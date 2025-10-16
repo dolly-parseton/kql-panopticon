@@ -1,6 +1,6 @@
 [package]
 name = "kql-panopticon"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["dolly-parseton"]
 description = "Terminal UI for executing KQL queries across multiple Azure Log Analytics workspaces concurrently with CSV/JSON export"
@@ -18,7 +18,7 @@ exclude = [
     "CLEANUP_SUMMARY.md",
     "DEAD_CODE_REVIEW.md",
     "test.rs",
-    "test_banner"
+    "test_banner",
 ]
 
 [dependencies]
@@ -33,7 +33,10 @@ thiserror = "1.0"
 chrono = "0.4"
 ratatui = "0.28"
 crossterm = "0.27"
-tui-textarea = { version = "0.6", default-features = false, features = ["ratatui", "crossterm"] }
+tui-textarea = { version = "0.6", default-features = false, features = [
+    "ratatui",
+    "crossterm",
+] }
 log = "0.4"
 env_logger = "0.11"
 dirs = "5.0"
