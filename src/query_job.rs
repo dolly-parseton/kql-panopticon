@@ -82,6 +82,7 @@ pub struct JobSuccess {
     pub row_count: usize,
 
     /// Number of pages fetched (for paginated queries)
+    #[allow(dead_code)]
     pub page_count: usize,
 
     /// Output file path

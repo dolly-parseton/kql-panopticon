@@ -63,7 +63,8 @@ pub fn render(f: &mut Frame, model: &mut JobsModel, area: Rect) {
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
-        );
+        )
+        .highlight_symbol(">> ");
 
     f.render_stateful_widget(table, area, &mut model.table_state);
 }

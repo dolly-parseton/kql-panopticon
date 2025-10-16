@@ -49,7 +49,8 @@ pub fn render(f: &mut Frame, model: &mut WorkspacesModel, area: Rect) {
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
-        );
+        )
+        .highlight_symbol(">> ");
 
     f.render_stateful_widget(table, area, &mut model.table_state);
 }
