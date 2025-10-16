@@ -19,3 +19,19 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+CLAUDE.md
+.claude/
+
+# Added by cargo
+
+/target
+
+# KQL Panopticon specific
+output/
+*.log
+.DS_Store
+CLEANUP_SUMMARY.md
+DEAD_CODE_REVIEW.md
+test.rs
+test_banner
