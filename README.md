@@ -1,5 +1,6 @@
 # KQL Panopticon
 
+[![Crates.io](https://img.shields.io/crates/v/kql-panopticon.svg)](https://crates.io/crates/kql-panopticon)
 [![Build Status](https://github.com/dolly-parseton/kql-panopticon/workflows/CI/badge.svg)](https://github.com/dolly-parseton/kql-panopticon/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
@@ -31,6 +32,14 @@ A terminal-based tool for executing Kusto Query Language (KQL) queries across mu
 
 ## Installation
 
+### From crates.io (recommended)
+
+```bash
+cargo install kql-panopticon
+```
+
+### From source
+
 ```bash
 git clone https://github.com/dolly-parseton/kql-panopticon.git
 cd kql-panopticon
@@ -41,6 +50,12 @@ The binary will be located at `target/release/kql-panopticon`.
 
 ## Usage
 
+If installed from crates.io:
+```bash
+kql-panopticon
+```
+
+If running from source:
 ```bash
 cargo run --release
 ```
