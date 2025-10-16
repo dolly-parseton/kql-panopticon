@@ -31,7 +31,3 @@ CLAUDE.md
 output/
 *.log
 .DS_Store
-CLEANUP_SUMMARY.md
-DEAD_CODE_REVIEW.md
-test.rs
-test_banner

@@ -197,10 +197,10 @@ impl Session {
             .iter()
             .map(|job| {
                 let status = match job.status.as_str() {
-                    "Queued" => JobStatus::Queued,
-                    "Running" => JobStatus::Running,
-                    "Completed" => JobStatus::Completed,
-                    "Failed" => JobStatus::Failed,
+                    "QUEUED" => JobStatus::Queued,
+                    "RUNNING" => JobStatus::Running,
+                    "COMPLETED" => JobStatus::Completed,
+                    "FAILED" => JobStatus::Failed,
                     _ => JobStatus::Queued,
                 };
 

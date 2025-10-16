@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 /// Render the sessions tab
-pub fn render(f: &mut Frame, model: &Model, area: Rect) {
+pub fn render(f: &mut Frame, model: &mut Model, area: Rect) {
     let selected_index = model.sessions.table_state.selected();
 
     // Create table rows
@@ -20,15 +20,15 @@ pub fn render(f: &mut Frame, model: &Model, area: Rect) {
             let is_selected = Some(idx) == selected_index;
             let fg_color = session.state.color(is_selected);
 
-            let name_cell = Cell::from(session.name.clone()).style(Style::default().fg(fg_color));
+            let name_cell = Cell::from(session.name.as_str()).style(Style::default().fg(fg_color));
 
             let status_cell =
                 Cell::from(session.state.indicator()).style(Style::default().fg(fg_color));
 
             let last_saved = session
                 .last_saved
-                .clone()
-                .unwrap_or_else(|| "Never".to_string());
+                .as_deref()
+                .unwrap_or("Never");
             let saved_cell = Cell::from(last_saved).style(Style::default().fg(fg_color));
 
             Row::new(vec![name_cell, status_cell, saved_cell])
@@ -74,10 +74,11 @@ pub fn render(f: &mut Frame, model: &Model, area: Rect) {
         Style::default()
             .add_modifier(Modifier::REVERSED)
             .add_modifier(Modifier::BOLD),
-    );
+    )
+    .highlight_symbol(">> ");
 
     // Render the table
-    f.render_stateful_widget(table, area, &mut model.sessions.table_state.clone());
+    f.render_stateful_widget(table, area, &mut model.sessions.table_state);
 
     // Note: Help text is shown in the control bar at the bottom of the screen
 }
