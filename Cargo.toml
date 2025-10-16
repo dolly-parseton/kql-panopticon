@@ -1,0 +1,41 @@
+[package]
+name = "kql-panopticon"
+version = "0.1.0"
+edition = "2021"
+authors = ["dolly-parseton"]
+description = "Terminal UI for executing KQL queries across multiple Azure Log Analytics workspaces concurrently with CSV/JSON export"
+license = "MIT"
+repository = "https://github.com/dolly-parseton/kql-panopticon"
+homepage = "https://github.com/dolly-parseton/kql-panopticon"
+readme = "README.md"
+keywords = ["azure", "kql", "log-analytics", "tui", "kusto"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = [
+    "output/",
+    "*.log",
+    ".DS_Store",
+    "CLAUDE.md",
+    "CLEANUP_SUMMARY.md",
+    "DEAD_CODE_REVIEW.md",
+    "test.rs",
+    "test_banner"
+]
+
+[dependencies]
+azure_identity = "0.20"
+azure_core = "0.20"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+chrono = "0.4"
+ratatui = "0.28"
+crossterm = "0.27"
+tui-textarea = { version = "0.6", default-features = false, features = ["ratatui", "crossterm"] }
+ansi-to-tui = "6"
+unicode-width = "0.2"
+log = "0.4"
+env_logger = "0.11"
+dirs = "5.0"
