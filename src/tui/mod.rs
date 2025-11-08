@@ -53,6 +53,9 @@ pub async fn run_tui(client: Client) -> Result<()> {
         // Load sessions from disk (no async needed)
         let _ = tx.send(message::Message::SessionsRefresh);
 
+        // Load query packs from disk (no async needed)
+        let _ = tx.send(message::Message::PacksRefresh);
+
         // Authenticate and load workspaces
         match init_client.force_validate_auth().await {
             Ok(_) => {
@@ -219,11 +222,12 @@ fn handle_key_event(key: KeyCode, modifiers: KeyModifiers, model: &Model) -> Mes
 
     // Tab key always works
     if key == KeyCode::Tab {
-        if modifiers.contains(KeyModifiers::SHIFT) {
-            return Message::SwitchTab(model.current_tab.previous());
-        } else {
-            return Message::SwitchTab(model.current_tab.next());
-        }
+        return Message::SwitchTab(model.current_tab.next());
+    }
+
+    // BackTab (Shift+Tab) goes to previous tab
+    if key == KeyCode::BackTab {
+        return Message::SwitchTab(model.current_tab.previous());
     }
 
     // Ctrl+J for query execution (works in any mode)
@@ -241,13 +245,14 @@ fn handle_key_event(key: KeyCode, modifiers: KeyModifiers, model: &Model) -> Mes
         Tab::Query => handle_query_key(key, modifiers, model),
         Tab::Jobs => handle_jobs_key(key),
         Tab::Sessions => handle_sessions_key(key, modifiers),
+        Tab::Packs => handle_packs_key(key),
     }
 }
 
 /// Handle key events when a popup is open
 fn handle_popup_key(key: KeyCode, popup: &model::Popup, model: &Model) -> Message {
     match popup {
-        model::Popup::Error(_) => {
+        model::Popup::Error(_) | model::Popup::Success(_) => {
             if matches!(key, KeyCode::Esc | KeyCode::Enter) {
                 Message::ClosePopup
             } else {
@@ -388,6 +393,8 @@ fn handle_query_key(key: KeyCode, modifiers: KeyModifiers, model: &Model) -> Mes
                 }
                 KeyCode::Char('c') => Message::QueryClear, // Clear all text
                 KeyCode::Char('l') => Message::QueryOpenLoadPanel, // Load query from job
+                KeyCode::Char('[') => Message::QueryPrevPackQuery, // Previous query in pack
+                KeyCode::Char(']') => Message::QueryNextPackQuery, // Next query in pack
                 // Navigation in normal mode
                 KeyCode::Char('h') | KeyCode::Left => Message::QueryMoveCursor(KeyCode::Left),
                 KeyCode::Char('j') | KeyCode::Down => Message::QueryMoveCursor(KeyCode::Down),
@@ -457,6 +464,20 @@ fn handle_sessions_key(key: KeyCode, modifiers: KeyModifiers) -> Message {
         }
         KeyCode::Char('l') => Message::SessionsLoad,
         KeyCode::Char('d') => Message::SessionsDelete,
+        KeyCode::Char('p') => Message::SessionExportAsPack,
+        _ => Message::NoOp,
+    }
+}
+
+/// Handle key events for the Packs tab
+fn handle_packs_key(key: KeyCode) -> Message {
+    match key {
+        KeyCode::Up => Message::PacksPrevious,
+        KeyCode::Down => Message::PacksNext,
+        KeyCode::Char('r') => Message::PacksRefresh,
+        KeyCode::Enter => Message::PacksLoadQuery,
+        KeyCode::Char('e') => Message::PacksExecute,
+        KeyCode::Char('s') => Message::PacksSave,
         _ => Message::NoOp,
     }
 }

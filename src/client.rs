@@ -82,12 +82,14 @@ struct AzureError {
 
 #[derive(Deserialize, Debug)]
 struct AzureErrorDetail {
+    #[allow(dead_code)]
     code: Option<String>,
     message: String,
 }
 
 #[derive(Deserialize, Debug)]
 struct AzureInnerError {
+    #[allow(dead_code)]
     code: Option<String>,
     message: Option<String>,
 }

@@ -47,6 +47,7 @@ pub struct SessionEntry {
     pub name: String,
     pub state: SessionState,
     pub last_saved: Option<String>, // Timestamp or "Never" for unsaved
+    pub created_from_pack: Option<String>, // Pack origin if any
 }
 
 /// Sessions tab state
@@ -62,6 +63,8 @@ pub struct SessionModel {
     pub has_unsaved_changes: bool,
     /// Input buffer for new session name
     pub name_input: Option<String>,
+    /// Query pack that created the current session (if any)
+    pub current_pack_origin: Option<String>,
 }
 
 impl SessionModel {
@@ -73,6 +76,7 @@ impl SessionModel {
             current_session_name: None,
             has_unsaved_changes: false,
             name_input: None,
+            current_pack_origin: None,
         }
     }
 
@@ -93,6 +97,11 @@ impl SessionModel {
         self.current_session_name = name;
         self.has_unsaved_changes = false;
         self.refresh_session_states();
+    }
+
+    /// Set the pack origin for the current session
+    pub fn set_pack_origin(&mut self, pack_path: Option<String>) {
+        self.current_pack_origin = pack_path;
     }
 
     /// Check if a session name is the current session
@@ -131,6 +140,7 @@ impl SessionModel {
                     name: current_name.clone(),
                     state: SessionState::CurrentNeverSaved,
                     last_saved: None,
+                    created_from_pack: self.current_pack_origin.clone(),
                 });
             }
         }
@@ -140,15 +150,16 @@ impl SessionModel {
             let exists_on_disk = true;
             let state = self.determine_state(&name, exists_on_disk);
 
-            // Try to load the session to get last_saved timestamp
-            let last_saved = crate::session::Session::load(&name)
-                .ok()
-                .map(|s| s.last_saved);
+            // Try to load the session to get last_saved timestamp and pack origin
+            let session = crate::session::Session::load(&name).ok();
+            let last_saved = session.as_ref().map(|s| s.last_saved.clone());
+            let created_from_pack = session.as_ref().and_then(|s| s.created_from_pack.clone());
 
             self.sessions.push(SessionEntry {
                 name,
                 state,
                 last_saved,
+                created_from_pack,
             });
         }
 

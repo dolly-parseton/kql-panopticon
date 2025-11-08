@@ -16,7 +16,7 @@ pub fn render(
     spinner_frame: usize,
     area: Rect,
 ) {
-    let tabs = [Tab::Query, Tab::Workspaces, Tab::Settings, Tab::Jobs, Tab::Sessions];
+    let tabs = [Tab::Query, Tab::Packs, Tab::Workspaces, Tab::Settings, Tab::Jobs, Tab::Sessions];
     let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
     let tab_spans: Vec<Span> = tabs

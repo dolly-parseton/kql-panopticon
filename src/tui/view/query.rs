@@ -30,16 +30,31 @@ pub fn render(f: &mut Frame, model: &QueryModel, jobs_model: &JobsModel, area: R
 
     // Create the block with mode indicator
     let help_text = match model.mode {
-        EditorMode::Normal => " | l:LOAD i:INSERT v:VISUAL ^J:EXECUTE ^U:UNDO ^R:REDO",
+        EditorMode::Normal => {
+            if model.pack_context.is_some() {
+                " | [:PREV ]:NEXT l:LOAD i:INSERT v:VISUAL ^J:EXECUTE"
+            } else {
+                " | l:LOAD i:INSERT v:VISUAL ^J:EXECUTE ^U:UNDO ^R:REDO"
+            }
+        }
         EditorMode::Insert => " | esc:NORMAL ^J:EXECUTE ^U:UNDO ^R:REDO",
         EditorMode::Visual => " | y:YANK d:DELETE esc:NORMAL",
     };
 
-    let block = Block::default().borders(Borders::ALL).title(vec![
-        Span::raw("Query "),
-        Span::styled(mode_indicator, mode_style),
-        Span::raw(help_text),
-    ]);
+    // Build title with pack context if available
+    let mut title_spans = vec![Span::raw("Query ")];
+
+    if let Some(pack_context) = &model.pack_context {
+        title_spans.push(Span::styled(
+            format!("[Pack: {}] ", pack_context.display_string()),
+            Style::default().fg(Color::Green),
+        ));
+    }
+
+    title_spans.push(Span::styled(mode_indicator, mode_style));
+    title_spans.push(Span::raw(help_text));
+
+    let block = Block::default().borders(Borders::ALL).title(title_spans);
 
     // Render the textarea with syntax highlighting
     let widget = SyntaxTextArea::new(&model.textarea).block(block);

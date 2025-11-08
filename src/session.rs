@@ -1,9 +1,11 @@
 use crate::error::KqlPanopticonError;
 use crate::query_job::{QueryJobResult, QuerySettings};
+use crate::query_pack::{PackQuery, QueryPack};
 use crate::tui::model::jobs::{JobState, JobStatus, JobsModel, RetryContext};
 use crate::tui::model::settings::SettingsModel;
 use crate::workspace::Workspace;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,6 +24,9 @@ pub struct Session {
     pub created_at: String,
     /// Timestamp when session was last saved
     pub last_saved: String,
+    /// Query pack that created this session (if any)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_from_pack: Option<String>,
     /// Settings at time of save
     pub settings: SerializableSettings,
     /// Jobs at time of save
@@ -114,10 +119,21 @@ impl From<&JobState> for SerializableJob {
 
 impl Session {
     /// Create a new session from current state
+    #[allow(dead_code)]
     pub fn new(
         name: String,
         settings: &SettingsModel,
         jobs: &[JobState],
+    ) -> Self {
+        Self::new_with_pack(name, settings, jobs, None)
+    }
+
+    /// Create a new session with optional pack origin
+    pub fn new_with_pack(
+        name: String,
+        settings: &SettingsModel,
+        jobs: &[JobState],
+        created_from_pack: Option<String>,
     ) -> Self {
         let now = chrono::Local::now().to_rfc3339();
 
@@ -126,6 +142,7 @@ impl Session {
             name: name.clone(),
             created_at: now.clone(),
             last_saved: now,
+            created_from_pack,
             settings: SerializableSettings::from(settings),
             jobs: jobs.iter().map(SerializableJob::from).collect(),
         }
@@ -167,6 +184,96 @@ impl Session {
         Ok(())
     }
 
+    /// Convert session to a reusable query pack
+    pub fn to_query_pack(&self) -> Result<QueryPack, KqlPanopticonError> {
+        // Deduplicate queries - use HashMap to track unique queries
+        let mut unique_queries: HashMap<String, PackQuery> = HashMap::new();
+
+        for (idx, job) in self.jobs.iter().enumerate() {
+            if let Some(query) = &job.query {
+                // Use query text as key for deduplication
+                if !unique_queries.contains_key(query) {
+                    let query_name = if self.jobs.len() == 1 {
+                        // Single query: use session name
+                        self.name.clone()
+                    } else {
+                        // Multiple queries: generate names
+                        format!("Query {}", idx + 1)
+                    };
+
+                    unique_queries.insert(
+                        query.clone(),
+                        PackQuery {
+                            name: query_name,
+                            description: Some(format!("From workspace: {}", job.workspace_name)),
+                            query: query.clone(),
+                        },
+                    );
+                }
+            }
+        }
+
+        if unique_queries.is_empty() {
+            return Err(KqlPanopticonError::QueryPackValidation(
+                "Session contains no queries to export".into(),
+            ));
+        }
+
+        // Generate pack name from session name (remove timestamp suffix if present)
+        let pack_name = self
+            .name
+            .rsplit_once('_')
+            .and_then(|(prefix, suffix)| {
+                // Check if suffix looks like a timestamp (8 digits or date-like)
+                if suffix.chars().all(|c| c.is_ascii_digit()) && suffix.len() >= 6 {
+                    Some(prefix.to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| self.name.clone());
+
+        // Extract settings
+        let settings = QuerySettings {
+            output_folder: PathBuf::from(&self.settings.output_folder),
+            job_name: "exported-query".to_string(),
+            export_csv: self.settings.export_csv,
+            export_json: self.settings.export_json,
+            parse_dynamics: self.settings.parse_dynamics,
+        };
+
+        // Build query pack
+        let queries: Vec<PackQuery> = unique_queries.into_values().collect();
+
+        let pack = if queries.len() == 1 {
+            // Single query: use simple format
+            QueryPack {
+                name: pack_name,
+                description: Some(format!("Exported from session: {}", self.name)),
+                author: Some("kql-panopticon".to_string()),
+                version: Some("1.0".to_string()),
+                query: Some(queries[0].query.clone()),
+                queries: None,
+                settings: Some(settings),
+                workspaces: None, // Don't include workspace scope
+            }
+        } else {
+            // Multiple queries: use multi-query format
+            QueryPack {
+                name: pack_name,
+                description: Some(format!("Exported from session: {}", self.name)),
+                author: Some("kql-panopticon".to_string()),
+                version: Some("1.0".to_string()),
+                query: None,
+                queries: Some(queries),
+                settings: Some(settings),
+                workspaces: None,
+            }
+        };
+
+        Ok(pack)
+    }
+
     /// List all available sessions
     pub fn list_all() -> Result<Vec<String>, KqlPanopticonError> {
         let sessions_dir = get_sessions_dir()?;
@@ -206,7 +313,7 @@ impl Session {
     }
 
     /// Convert this session's jobs to JobState vector
-    pub fn to_job_states(&self) -> Vec<JobState> {
+    pub fn to_job_states(&self, next_id: &mut u64) -> Vec<JobState> {
         self.jobs
             .iter()
             .map(|job| {
@@ -238,7 +345,7 @@ impl Session {
                     .as_ref()
                     .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
                     .map(|dt| dt.with_timezone(&chrono::Local))
-                    .unwrap_or_else(|| chrono::Local::now());
+                    .unwrap_or_else(chrono::Local::now);
 
                 // Reconstruct result and error info
                 let (result, error) = if let Some(err) = &job.error_message {
@@ -289,7 +396,12 @@ impl Session {
                     (None, None)
                 };
 
+                // Generate a new job ID for each loaded job
+                let job_id = *next_id;
+                *next_id += 1;
+
                 JobState {
+                    job_id,
                     status,
                     workspace_name: job.workspace_name.clone(),
                     query_preview: job.query_preview.clone(),

@@ -32,6 +32,15 @@ pub enum KqlPanopticonError {
     #[error("Invalid configuration: {0}")]
     InvalidConfiguration(String),
 
+    #[error("Query pack validation failed: {0}")]
+    QueryPackValidation(String),
+
+    #[error("Query pack not found: {0}")]
+    QueryPackNotFound(String),
+
+    #[error("Home directory not found")]
+    HomeDirectoryNotFound,
+
     #[error("{0}")]
     Other(String),
 }
@@ -56,6 +65,12 @@ impl From<anyhow::Error> for KqlPanopticonError {
 
 impl From<serde_json::Error> for KqlPanopticonError {
     fn from(err: serde_json::Error) -> Self {
+        KqlPanopticonError::JsonParseFailed(err.to_string())
+    }
+}
+
+impl From<serde_yaml::Error> for KqlPanopticonError {
+    fn from(err: serde_yaml::Error) -> Self {
         KqlPanopticonError::JsonParseFailed(err.to_string())
     }
 }

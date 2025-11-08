@@ -1,6 +1,6 @@
 [package]
 name = "kql-panopticon"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 authors = ["dolly-parseton"]
 description = "Terminal UI for executing KQL queries across multiple Azure Log Analytics workspaces concurrently with CSV/JSON export"
@@ -28,9 +28,14 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.11", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
 anyhow = "1.0"
 thiserror = "1.0"
 chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+regex = "1"
+walkdir = "2"
 ratatui = "0.28"
 crossterm = "0.27"
 tui-textarea = { version = "0.6", default-features = false, features = [

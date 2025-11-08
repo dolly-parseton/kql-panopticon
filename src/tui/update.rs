@@ -1,7 +1,37 @@
-use crate::query_job::{QueryJobBuilder, QuerySettings};
+use crate::query_job::{QueryJobBuilder, QueryJobResult, QuerySettings};
 use crate::tui::message::{Message, Tab};
 use crate::tui::model::{query::EditorMode, Model, Popup};
 use log::error;
+use std::time::Duration;
+
+/// Sanitize a string to be safe for use as a filename
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if c.is_whitespace() => '-',
+            c if c.is_alphanumeric() || c == '-' || c == '_' => c,
+            _ => '-',
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_lowercase()
+}
+
+/// Create a failed QueryJobResult for when execution fails
+fn create_failed_result(
+    retry_ctx: crate::tui::model::jobs::RetryContext,
+    error_msg: String,
+) -> QueryJobResult {
+    QueryJobResult {
+        workspace_id: retry_ctx.workspace.workspace_id.clone(),
+        workspace_name: retry_ctx.workspace.name.clone(),
+        query: retry_ctx.query,
+        result: Err(crate::error::KqlPanopticonError::Other(error_msg)),
+        elapsed: Duration::from_secs(0),
+        timestamp: chrono::Local::now(),
+    }
+}
 
 /// Update the model based on a message
 /// Returns a list of additional messages to process
@@ -343,23 +373,28 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                 model.settings.parse_dynamics,
             );
 
-            // Create job entries with retry context
-            let start_idx = model.jobs.jobs.len();
+            // Create job entries with retry context and capture their IDs
+            let mut job_ids = Vec::new();
             for workspace in &selected_workspaces {
-                let preview = model.query.get_preview(50);
+                // Use 200 chars for preview to show more KQL query context
+                let preview = model.query.get_preview(200);
                 let retry_context = crate::tui::model::jobs::RetryContext {
                     workspace: workspace.clone(),
                     query: query_text.clone(),
                     settings: settings.clone(),
                 };
-                model
+                let job_id = model
                     .jobs
                     .add_job_with_context(workspace.name.clone(), preview, retry_context);
+                job_ids.push(job_id);
             }
 
             // Clear popup and input
             model.query.job_name_input = None;
             model.popup = None;
+
+            // Clear pack origin since this is a manual query
+            model.sessions.set_pack_origin(None);
 
             // Mark session as dirty when jobs are added
             model.sessions.mark_dirty();
@@ -379,14 +414,15 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                     .execute(&client)
                     .await;
 
-                // Send results through the channel
+                // Send results through the channel using job IDs (not indices!)
                 match results {
                     Ok(results) => {
                         for (idx, result) in results.into_iter().enumerate() {
-                            let job_idx = start_idx + idx;
-                            let _ = update_tx.send(crate::tui::model::JobUpdateMessage::Completed(
-                                job_idx, result,
-                            ));
+                            if let Some(&job_id) = job_ids.get(idx) {
+                                let _ = update_tx.send(crate::tui::model::JobUpdateMessage::Completed(
+                                    job_id, result,
+                                ));
+                            }
                         }
                     }
                     Err(e) => {
@@ -531,6 +567,32 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
             vec![]
         }
 
+        Message::QueryNextPackQuery => {
+            if let Some(pack_context) = &mut model.query.pack_context {
+                if let Some(next_query) = pack_context.next_query() {
+                    // Replace query text with next query
+                    model.query.textarea.select_all();
+                    let len = model.query.textarea.yank_text().len();
+                    model.query.textarea.delete_str(len);
+                    model.query.textarea.insert_str(&next_query.query);
+                }
+            }
+            vec![]
+        }
+
+        Message::QueryPrevPackQuery => {
+            if let Some(pack_context) = &mut model.query.pack_context {
+                if let Some(prev_query) = pack_context.prev_query() {
+                    // Replace query text with previous query
+                    model.query.textarea.select_all();
+                    let len = model.query.textarea.yank_text().len();
+                    model.query.textarea.delete_str(len);
+                    model.query.textarea.insert_str(&prev_query.query);
+                }
+            }
+            vec![]
+        }
+
         // === Jobs ===
         Message::JobsPrevious => {
             let selected = model.jobs.table_state.selected().unwrap_or(0);
@@ -590,16 +652,16 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                 )];
             };
 
-            // Create new job entry with retry context
-            let new_job_idx = model.jobs.jobs.len();
-            let preview = retry_ctx.query.chars().take(50).collect();
-            model.jobs.add_job_with_context(
+            // Create new job entry with retry context and capture its ID
+            let preview = retry_ctx.query.chars().take(200).collect();  // Use 200 chars like elsewhere
+            let new_job_id = model.jobs.add_job_with_context(
                 retry_ctx.workspace.name.clone(),
                 preview,
                 retry_ctx.clone(),
             );
 
-            // Auto-select the new job for visibility
+            // Auto-select the new job for visibility (it's at the end of the list)
+            let new_job_idx = model.jobs.jobs.len() - 1;
             model.jobs.table_state.select(Some(new_job_idx));
 
             // Mark session as dirty when retrying jobs
@@ -624,7 +686,7 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                     Ok(mut results) if !results.is_empty() => {
                         let result = results.remove(0);
                         let _ = update_tx.send(crate::tui::model::JobUpdateMessage::Completed(
-                            new_job_idx,
+                            new_job_id,  // Use job ID, not index!
                             result,
                         ));
                     }
@@ -703,11 +765,17 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                 return vec![];
             };
 
+            // CRITICAL: Drain all pending job updates before saving session
+            // This ensures we capture the latest state of all jobs, including
+            // completion messages that may have arrived while the UI was busy
+            model.process_job_updates();
+
             // Create or update session
-            let mut session = crate::session::Session::new(
+            let mut session = crate::session::Session::new_with_pack(
                 session_name.clone(),
                 &model.settings,
                 &model.jobs.jobs,
+                model.sessions.current_pack_origin.clone(),
             );
 
             // If we're saving to the current session, update the timestamp
@@ -756,8 +824,8 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                         ))];
                     }
 
-                    // Load jobs
-                    model.jobs.jobs = session.to_job_states();
+                    // Load jobs - pass mutable reference to next_id generator
+                    model.jobs.jobs = session.to_job_states(model.jobs.next_job_id_mut());
                     // Sort jobs by timestamp (newest first)
                     model.jobs.sort_by_timestamp();
                     // If jobs were loaded, select the first one
@@ -766,6 +834,9 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                     } else {
                         model.jobs.table_state.select(None);
                     }
+
+                    // Load pack origin (if any)
+                    model.sessions.set_pack_origin(session.created_from_pack.clone());
 
                     // Set as current session
                     model.sessions.set_current_session(Some(session_name));
@@ -797,9 +868,364 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
             }
         }
 
+        Message::SessionExportAsPack => {
+            let Some(selected_session) = model.sessions.get_selected_session() else {
+                return vec![Message::ShowError("No session selected".to_string())];
+            };
+
+            let session_name = selected_session.name.clone();
+
+            // Load session from disk
+            let session = match crate::session::Session::load(&session_name) {
+                Ok(s) => s,
+                Err(e) => return vec![Message::ShowError(format!("Failed to load session: {}", e))],
+            };
+
+            // Convert to query pack
+            let pack = match session.to_query_pack() {
+                Ok(p) => p,
+                Err(e) => return vec![Message::ShowError(format!("Failed to convert to pack: {}", e))],
+            };
+
+            // Generate output filename (remove timestamp suffix if present)
+            let pack_name = session_name
+                .rsplit_once('_')
+                .and_then(|(prefix, suffix)| {
+                    if suffix.chars().all(|c| c.is_ascii_digit()) && suffix.len() >= 6 {
+                        Some(prefix)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(&session_name);
+
+            let output_path = match crate::query_pack::QueryPack::get_library_path(&format!("{}.yaml", pack_name)) {
+                Ok(p) => p,
+                Err(e) => return vec![Message::ShowError(format!("Failed to get output path: {}", e))],
+            };
+
+            // Ensure parent directory exists
+            if let Some(parent) = output_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    return vec![Message::ShowError(format!("Failed to create directory: {}", e))];
+                }
+            }
+
+            // Save pack
+            match pack.save_to_file(&output_path) {
+                Ok(()) => {
+                    // Refresh packs list to show the new pack
+                    // Note: Success is indicated by the pack appearing in the Packs tab
+                    vec![Message::PacksRefresh]
+                }
+                Err(e) => vec![Message::ShowError(format!("Failed to save pack: {}", e))],
+            }
+        }
+
+        // === Query Packs ===
+        Message::PacksPrevious => {
+            model.packs.previous();
+            vec![]
+        }
+
+        Message::PacksNext => {
+            model.packs.next();
+            vec![]
+        }
+
+        Message::PacksRefresh => {
+            model.packs.refresh();
+            vec![]
+        }
+
+        Message::PacksLoadDetails => {
+            // Lazy load the selected pack
+            if let Err(e) = model.packs.load_selected_pack() {
+                vec![Message::ShowError(format!("Failed to load pack: {}", e))]
+            } else {
+                vec![]
+            }
+        }
+
+        Message::PacksLoadQuery => {
+            // First ensure the pack is loaded
+            if let Err(e) = model.packs.load_selected_pack() {
+                return vec![Message::ShowError(format!("Failed to load pack: {}", e))];
+            }
+
+            // Now get the loaded pack and extract query
+            if let Some(entry) = model.packs.get_selected_entry() {
+                if let Some(pack) = &entry.pack {
+                    let queries = pack.get_queries();
+                    if let Some(first_query) = queries.first() {
+                        // Set the query text in the editor
+                        model.query.textarea.select_all();
+                        let len = model.query.textarea.yank_text().len();
+                        model.query.textarea.delete_str(len);
+                        model.query.textarea.insert_str(&first_query.query);
+
+                        // Set pack context for navigation
+                        model.query.pack_context = Some(crate::tui::model::query::PackContext {
+                            pack_name: pack.name.clone(),
+                            pack_path: entry.relative_path.clone(),
+                            queries: queries.clone(),
+                            current_index: 0,
+                        });
+
+                        // Switch to Query tab
+                        vec![Message::SwitchTab(Tab::Query)]
+                    } else {
+                        vec![Message::ShowError("Pack contains no queries".to_string())]
+                    }
+                } else {
+                    vec![Message::ShowError("Failed to load pack details".to_string())]
+                }
+            } else {
+                vec![Message::ShowError("No pack selected".to_string())]
+            }
+        }
+
+        Message::PacksExecute => {
+            // First ensure the pack is loaded
+            if let Err(e) = model.packs.load_selected_pack() {
+                return vec![Message::ShowError(format!("Failed to load pack: {}", e))];
+            }
+
+            // Now execute the pack
+            if let Some(entry) = model.packs.get_selected_entry() {
+                if let Some(pack) = &entry.pack {
+                    let selected_workspaces: Vec<_> = model
+                        .workspaces
+                        .workspaces
+                        .iter()
+                        .filter(|ws| ws.selected)
+                        .map(|ws| ws.workspace.clone())
+                        .collect();
+
+                    if selected_workspaces.is_empty() {
+                        return vec![Message::ShowError(
+                            "No workspaces selected. Go to Workspaces tab and select some.".to_string()
+                        )];
+                    }
+
+                    let queries = pack.get_queries();
+                    if queries.is_empty() {
+                        return vec![Message::ShowError("Pack contains no queries".to_string())];
+                    }
+
+                    // Get base settings from pack or use current settings
+                    let base_settings = pack.settings.clone().unwrap_or_else(|| QuerySettings {
+                        job_name: "query".to_string(), // Will be overridden per query
+                        export_csv: model.settings.export_csv,
+                        export_json: model.settings.export_json,
+                        parse_dynamics: model.settings.parse_dynamics,
+                        output_folder: model.settings.output_folder.clone().into(),
+                    });
+
+                    // Create jobs for all queries x workspaces
+                    // Collect job IDs for tracking completion
+                    let mut job_ids = Vec::new();
+                    let job_count_before = model.jobs.jobs.len();
+
+                    for pack_query in &queries {
+                        // Create unique settings for each query with sanitized name
+                        let query_job_name = sanitize_filename(&pack_query.name);
+                        let mut query_settings = base_settings.clone();
+                        query_settings.job_name = query_job_name;
+
+                        for workspace in &selected_workspaces {
+                            // Create a better preview for KQL queries (200 chars to show more context)
+                            let query_preview = pack_query.query.chars().take(200).collect();
+
+                            let retry_context = crate::tui::model::jobs::RetryContext {
+                                workspace: workspace.clone(),
+                                query: pack_query.query.clone(),
+                                settings: query_settings.clone(),
+                            };
+
+                            // Capture the job ID for this job
+                            let job_id = model.jobs.add_job_with_context(
+                                workspace.name.clone(),
+                                query_preview,
+                                retry_context.clone(),
+                            );
+
+                            job_ids.push((job_id, retry_context));
+                        }
+                    }
+
+                    // Track pack origin for session
+                    model.sessions.set_pack_origin(Some(entry.relative_path.clone()));
+
+                    // Mark session as dirty
+                    model.sessions.mark_dirty();
+
+                    // Execute each job individually to preserve per-query settings
+                    // (QueryJobBuilder applies a single settings to all jobs, losing our sanitized names)
+                    let client = model.client.clone();
+                    let update_tx = model.job_update_tx.clone();
+
+                    log::info!("Spawning {} tasks for pack execution", job_ids.len());
+
+                    // Spawn individual tasks for each job using stable job IDs
+                    for (job_id, retry_ctx) in job_ids {
+                        let client = client.clone();
+                        let tx = update_tx.clone();
+
+                        log::debug!("Spawning task for job ID {}", job_id);
+
+                        tokio::spawn(async move {
+                            // Clone retry_ctx for error cases (will be moved into builder)
+                            let retry_ctx_for_errors = retry_ctx.clone();
+
+                            let results = QueryJobBuilder::new()
+                                .workspaces(vec![retry_ctx.workspace])
+                                .queries(vec![retry_ctx.query])
+                                .settings(retry_ctx.settings)
+                                .execute(&client)
+                                .await;
+
+                            // Send completion message in ALL cases (success or failure)
+                            match results {
+                                Ok(mut results) if !results.is_empty() => {
+                                    let result = results.remove(0);
+                                    log::debug!("Job {} completed successfully, sending completion message", job_id);
+                                    let _ = tx.send(crate::tui::model::JobUpdateMessage::Completed(
+                                        job_id, result,
+                                    ));
+                                }
+                                Ok(_) => {
+                                    // Empty results - shouldn't happen but handle it
+                                    log::error!("Job {} produced no results (empty vec), sending failed message", job_id);
+                                    // Create a failed result to update the UI
+                                    let failed_result = create_failed_result(
+                                        retry_ctx_for_errors,
+                                        "Query execution returned no results".to_string(),
+                                    );
+                                    let _ = tx.send(crate::tui::model::JobUpdateMessage::Completed(
+                                        job_id, failed_result,
+                                    ));
+                                }
+                                Err(e) => {
+                                    // Execution error - create failed result
+                                    log::error!("Job {} failed: {}, sending failed message", job_id, e);
+                                    let failed_result = create_failed_result(
+                                        retry_ctx_for_errors,
+                                        e.to_string(),
+                                    );
+                                    let _ = tx.send(crate::tui::model::JobUpdateMessage::Completed(
+                                        job_id, failed_result,
+                                    ));
+                                }
+                            }
+                        });
+                    }
+
+                    // Mark all newly created jobs as running
+                    for i in job_count_before..model.jobs.jobs.len() {
+                        if let Some(job) = model.jobs.jobs.get_mut(i) {
+                            job.status = crate::tui::model::jobs::JobStatus::Running;
+                        }
+                    }
+
+                    vec![
+                        Message::SwitchTab(Tab::Jobs),
+                        Message::ShowError(format!(
+                            "Executing {} queries across {} workspaces",
+                            queries.len(),
+                            selected_workspaces.len()
+                        )),
+                    ]
+                } else {
+                    vec![Message::ShowError("Failed to load pack details".to_string())]
+                }
+            } else {
+                vec![Message::ShowError("No pack selected".to_string())]
+            }
+        }
+
+        Message::PacksSave => {
+            // Check if there's a pack loaded in the query editor
+            if let Some(pack_context) = &model.query.pack_context {
+                // Clone necessary data to avoid borrow checker issues
+                let pack_path = pack_context.pack_path.clone();
+                let current_index = pack_context.current_index;
+
+                // Get the current query text from the editor
+                let current_query_text = model.query.get_text();
+
+                // Find the pack entry that matches the loaded pack
+                let pack_entry = model.packs.packs.iter_mut()
+                    .find(|entry| entry.relative_path == pack_path);
+
+                if let Some(entry) = pack_entry {
+                    // Ensure the pack is loaded
+                    if entry.pack.is_none() {
+                        if let Err(e) = crate::query_pack::QueryPack::load_from_file(&entry.path) {
+                            return vec![Message::ShowError(format!("Failed to load pack: {}", e))];
+                        }
+                    }
+
+                    if let Some(pack) = &mut entry.pack {
+                        // Update the specific query in the pack
+                        let queries = pack.get_queries();
+
+                        if current_index >= queries.len() {
+                            return vec![Message::ShowError("Invalid query index".to_string())];
+                        }
+
+                        // Reconstruct the pack with the updated query
+                        if let Some(pack_queries) = &mut pack.queries {
+                            // Multiple queries format
+                            if current_index < pack_queries.len() {
+                                pack_queries[current_index].query = current_query_text.clone();
+                            }
+                        } else if pack.query.is_some() && current_index == 0 {
+                            // Single query format
+                            pack.query = Some(current_query_text.clone());
+                        }
+
+                        // Save the pack to disk
+                        let pack_name = pack.name.clone();
+                        match pack.save_to_file(&entry.path) {
+                            Ok(_) => {
+                                // Update the pack_context with the saved query
+                                if let Some(ctx) = &mut model.query.pack_context {
+                                    if current_index < ctx.queries.len() {
+                                        ctx.queries[current_index].query = current_query_text;
+                                    }
+                                }
+
+                                vec![Message::ShowSuccess(format!(
+                                    "Saved changes to pack: {}",
+                                    pack_name
+                                ))]
+                            }
+                            Err(e) => {
+                                vec![Message::ShowError(format!("Failed to save pack: {}", e))]
+                            }
+                        }
+                    } else {
+                        vec![Message::ShowError("Pack not loaded".to_string())]
+                    }
+                } else {
+                    vec![Message::ShowError("Pack not found in list".to_string())]
+                }
+            } else {
+                vec![Message::ShowError(
+                    "No pack loaded. Load a pack from the Packs tab first.".to_string()
+                )]
+            }
+        }
+
         // === Popups ===
         Message::ShowError(msg) => {
             model.popup = Some(Popup::Error(msg));
+            vec![]
+        }
+
+        Message::ShowSuccess(msg) => {
+            model.popup = Some(Popup::Success(msg));
             vec![]
         }
 

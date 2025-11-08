@@ -10,6 +10,7 @@ use tokio::io::AsyncWriteExt;
 
 /// Settings for query execution
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct QuerySettings {
     /// Base output folder for all results
     pub output_folder: PathBuf,
@@ -25,6 +26,18 @@ pub struct QuerySettings {
 
     /// Parse nested dynamic fields into JSON objects (only affects JSON export)
     pub parse_dynamics: bool,
+}
+
+impl Default for QuerySettings {
+    fn default() -> Self {
+        Self {
+            output_folder: PathBuf::from("./output"),
+            job_name: "query".to_string(),
+            export_csv: true,
+            export_json: false,
+            parse_dynamics: true,
+        }
+    }
 }
 
 impl QuerySettings {
@@ -79,7 +92,7 @@ pub struct QueryJobResult {
 }
 
 /// Success information for a completed job
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct JobSuccess {
     /// Number of rows returned
     pub row_count: usize,

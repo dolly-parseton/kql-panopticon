@@ -100,6 +100,10 @@ pub enum Message {
     QueryLoadPanelConfirm,
     /// Cancel load panel (restore original query)
     QueryLoadPanelCancel,
+    /// Navigate to next query in pack (] key)
+    QueryNextPackQuery,
+    /// Navigate to previous query in pack ([ key)
+    QueryPrevPackQuery,
 
     // === Jobs ===
     /// Navigate jobs list up
@@ -132,10 +136,31 @@ pub enum Message {
     SessionsLoad,
     /// Delete selected session
     SessionsDelete,
+    /// Export selected session as query pack
+    SessionExportAsPack,
+
+    // === Query Packs ===
+    /// Navigate packs list up
+    PacksPrevious,
+    /// Navigate packs list down
+    PacksNext,
+    /// Refresh packs list from disk
+    PacksRefresh,
+    /// Load selected pack details
+    #[allow(dead_code)]
+    PacksLoadDetails,
+    /// Load first query from selected pack into query editor
+    PacksLoadQuery,
+    /// Execute selected pack on selected workspaces
+    PacksExecute,
+    /// Save current query changes back to the loaded pack
+    PacksSave,
 
     // === Popups ===
-    /// Show an error popup
+    /// Show an error popup (red)
     ShowError(String),
+    /// Show a success popup (green)
+    ShowSuccess(String),
     /// Close the current popup
     ClosePopup,
 
@@ -154,6 +179,7 @@ pub enum Message {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Query,
+    Packs,
     Workspaces,
     Settings,
     Jobs,
@@ -163,7 +189,8 @@ pub enum Tab {
 impl Tab {
     pub fn next(self) -> Self {
         match self {
-            Tab::Query => Tab::Workspaces,
+            Tab::Query => Tab::Packs,
+            Tab::Packs => Tab::Workspaces,
             Tab::Workspaces => Tab::Settings,
             Tab::Settings => Tab::Jobs,
             Tab::Jobs => Tab::Sessions,
@@ -174,7 +201,8 @@ impl Tab {
     pub fn previous(self) -> Self {
         match self {
             Tab::Query => Tab::Sessions,
-            Tab::Workspaces => Tab::Query,
+            Tab::Packs => Tab::Query,
+            Tab::Workspaces => Tab::Packs,
             Tab::Settings => Tab::Workspaces,
             Tab::Jobs => Tab::Settings,
             Tab::Sessions => Tab::Jobs,
@@ -184,10 +212,11 @@ impl Tab {
     pub fn as_str(self) -> &'static str {
         match self {
             Tab::Query => "Query (1)",
-            Tab::Workspaces => "Workspaces (2)",
-            Tab::Settings => "Settings (3)",
-            Tab::Jobs => "Jobs (4)",
-            Tab::Sessions => "Sessions (5)",
+            Tab::Packs => "Packs (2)",
+            Tab::Workspaces => "Workspaces (3)",
+            Tab::Settings => "Settings (4)",
+            Tab::Jobs => "Jobs (5)",
+            Tab::Sessions => "Sessions (6)",
         }
     }
 }

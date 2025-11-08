@@ -1,4 +1,5 @@
 pub mod jobs;
+pub mod packs;
 pub mod query;
 pub mod session;
 pub mod settings;
@@ -8,6 +9,7 @@ use crate::client::Client;
 use crate::query_job::QueryJobResult;
 use crate::tui::message::Tab;
 use jobs::JobsModel;
+use packs::PacksModel;
 use query::QueryModel;
 use session::SessionModel;
 use settings::SettingsModel;
@@ -28,6 +30,8 @@ pub struct Model {
     pub jobs: JobsModel,
     /// Sessions state
     pub sessions: SessionModel,
+    /// Query packs state
+    pub packs: PacksModel,
     /// Azure client
     pub client: Client,
     /// Current popup message (if any)
@@ -45,8 +49,10 @@ pub struct Model {
 /// Popup types
 #[derive(Debug, Clone)]
 pub enum Popup {
-    /// Error message
+    /// Error message (red)
     Error(String),
+    /// Success message (green)
+    Success(String),
     /// Settings edit popup
     SettingsEdit,
     /// Job name input popup
@@ -60,7 +66,7 @@ pub enum Popup {
 /// Message for job status updates from background tasks
 #[derive(Debug, Clone)]
 pub enum JobUpdateMessage {
-    Completed(usize, QueryJobResult), // Job index completed with result
+    Completed(u64, QueryJobResult), // Job ID (not index!) completed with result
 }
 
 /// Initialization state of the application
@@ -86,6 +92,7 @@ impl Model {
             query: QueryModel::new(),
             jobs: JobsModel::new(),
             sessions: SessionModel::new(),
+            packs: PacksModel::new(),
             client,
             popup: None,
             job_update_rx,

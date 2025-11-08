@@ -31,7 +31,14 @@ pub fn render(f: &mut Frame, model: &mut Model, area: Rect) {
                 .unwrap_or("Never");
             let saved_cell = Cell::from(last_saved).style(Style::default().fg(fg_color));
 
-            Row::new(vec![name_cell, status_cell, saved_cell])
+            // Pack origin cell
+            let pack_origin = session
+                .created_from_pack
+                .as_deref()
+                .unwrap_or("-");
+            let pack_cell = Cell::from(pack_origin).style(Style::default().fg(fg_color));
+
+            Row::new(vec![name_cell, status_cell, saved_cell, pack_cell])
         })
         .collect();
 
@@ -52,15 +59,21 @@ pub fn render(f: &mut Frame, model: &mut Model, area: Rect) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
+        Cell::from("Pack Origin").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
     ]);
 
     // Create table widget
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(40),
             Constraint::Percentage(30),
-            Constraint::Percentage(30),
+            Constraint::Percentage(25),
+            Constraint::Percentage(20),
+            Constraint::Percentage(25),
         ],
     )
     .header(header)

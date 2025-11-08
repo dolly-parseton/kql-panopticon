@@ -26,6 +26,7 @@ const JOB_DETAILS_POPUP_HEIGHT: u16 = 80;
 pub fn render(f: &mut Frame, popup: &Popup, model: &Model) {
     match popup {
         Popup::Error(msg) => render_error(f, msg),
+        Popup::Success(msg) => render_success(f, msg),
         Popup::SettingsEdit => render_settings_edit(f, &model.settings),
         Popup::JobNameInput => render_job_name_input(f, &model.query),
         Popup::SessionNameInput => render_session_name_input(f, &model.sessions),
@@ -47,6 +48,23 @@ fn render_error(f: &mut Frame, msg: &str) {
                 .borders(Borders::ALL)
                 .title("Error")
                 .style(Style::default().bg(Color::Black).fg(Color::Red)),
+        )
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(Clear, area);
+    f.render_widget(paragraph, area);
+}
+
+/// Render a success popup
+fn render_success(f: &mut Frame, msg: &str) {
+    let area = centered_rect(ERROR_POPUP_WIDTH, ERROR_POPUP_HEIGHT, f.area());
+
+    let paragraph = Paragraph::new(msg)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Success")
+                .style(Style::default().bg(Color::Black).fg(Color::Green)),
         )
         .wrap(Wrap { trim: false });
 

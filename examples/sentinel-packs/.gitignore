@@ -1,0 +1,10 @@
+# Ignore the submodule directory (tracked separately)
+Sentinel-Queries/
+
+# Ignore generated packs
+generated-packs/
+
+# Python virtual environment
+venv/
+__pycache__/
+*.pyc

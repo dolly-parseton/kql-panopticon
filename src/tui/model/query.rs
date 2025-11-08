@@ -1,3 +1,4 @@
+use crate::query_pack::PackQuery;
 use tui_textarea::TextArea;
 
 /// Query editor mode (Vim-style)
@@ -6,6 +7,58 @@ pub enum EditorMode {
     Normal, // Normal mode - navigation and commands
     Insert, // Insert mode - text editing
     Visual, // Visual mode - text selection
+}
+
+/// Pack context - tracks which query pack is currently loaded in the editor
+#[derive(Debug, Clone)]
+pub struct PackContext {
+    /// Display name of the pack
+    pub pack_name: String,
+    /// Relative path from packs directory (for matching with PacksModel)
+    pub pack_path: String,
+    /// All queries in this pack
+    pub queries: Vec<PackQuery>,
+    /// Index of currently displayed query
+    pub current_index: usize,
+}
+
+impl PackContext {
+    /// Navigate to the next query in the pack
+    pub fn next_query(&mut self) -> Option<&PackQuery> {
+        if self.queries.is_empty() {
+            return None;
+        }
+        self.current_index = (self.current_index + 1) % self.queries.len();
+        Some(&self.queries[self.current_index])
+    }
+
+    /// Navigate to the previous query in the pack
+    pub fn prev_query(&mut self) -> Option<&PackQuery> {
+        if self.queries.is_empty() {
+            return None;
+        }
+        if self.current_index == 0 {
+            self.current_index = self.queries.len() - 1;
+        } else {
+            self.current_index -= 1;
+        }
+        Some(&self.queries[self.current_index])
+    }
+
+    /// Get the current query
+    pub fn current_query(&self) -> Option<&PackQuery> {
+        self.queries.get(self.current_index)
+    }
+
+    /// Get display string for pack context (e.g., "Security Hunt (2/5)")
+    pub fn display_string(&self) -> String {
+        format!(
+            "{} ({}/{})",
+            self.pack_name,
+            self.current_index + 1,
+            self.queries.len()
+        )
+    }
 }
 
 /// Sort order for load panel
@@ -61,6 +114,8 @@ pub struct QueryModel {
     pub job_name_input: Option<String>,
     /// Load panel state (None = closed, Some = open)
     pub load_panel: Option<LoadPanelState>,
+    /// Pack context (if query was loaded from a pack)
+    pub pack_context: Option<PackContext>,
 }
 
 impl QueryModel {
@@ -77,6 +132,7 @@ impl QueryModel {
             mode: EditorMode::Normal,
             job_name_input: None,
             load_panel: None,
+            pack_context: None,
         }
     }
 

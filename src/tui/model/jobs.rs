@@ -122,6 +122,8 @@ impl JobError {
 /// Job execution state
 #[derive(Debug, Clone)]
 pub struct JobState {
+    /// Unique identifier for this job (stable across sorting/reordering)
+    pub job_id: u64,
     pub status: JobStatus,
     pub workspace_name: String,
     pub query_preview: String,
@@ -168,6 +170,8 @@ pub struct JobsModel {
     pub jobs: Vec<JobState>,
     /// Table state for scrolling
     pub table_state: TableState,
+    /// Counter for generating unique job IDs
+    next_job_id: u64,
 }
 
 impl JobsModel {
@@ -176,13 +180,29 @@ impl JobsModel {
         Self {
             jobs: Vec::new(),
             table_state: TableState::default(),
+            next_job_id: 1, // Start from 1 (0 reserved for invalid/unset)
         }
+    }
+
+    /// Generate a new unique job ID
+    fn next_id(&mut self) -> u64 {
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        id
+    }
+
+    /// Get mutable reference to the next job ID (for session loading)
+    pub fn next_job_id_mut(&mut self) -> &mut u64 {
+        &mut self.next_job_id
     }
 
     /// Add a new job in queued state (deprecated - use add_job_with_context)
     #[allow(dead_code)]
     pub fn add_job(&mut self, workspace_name: String, query_preview: String) {
+        let job_id = self.next_id();
+
         self.jobs.push(JobState {
+            job_id,
             status: JobStatus::Queued,
             workspace_name,
             query_preview,
@@ -204,8 +224,11 @@ impl JobsModel {
         workspace_name: String,
         query_preview: String,
         retry_context: RetryContext,
-    ) {
+    ) -> u64 {
+        let job_id = self.next_id();
+
         self.jobs.push(JobState {
+            job_id,
             status: JobStatus::Queued,
             workspace_name,
             query_preview,
@@ -219,11 +242,15 @@ impl JobsModel {
         if self.jobs.len() == 1 {
             self.table_state.select(Some(0));
         }
+
+        job_id // Return the job ID for tracking
     }
 
     /// Update a job's status to completed
-    pub fn complete_job(&mut self, index: usize, result: QueryJobResult) {
-        if let Some(job) = self.jobs.get_mut(index) {
+    /// Finds the job by ID (stable across sorting) instead of index
+    pub fn complete_job(&mut self, job_id: u64, result: QueryJobResult) {
+        // Find job by ID (not index!) since array may have been sorted
+        if let Some(job) = self.jobs.iter_mut().find(|j| j.job_id == job_id) {
             job.duration = Some(result.elapsed);
 
             // Extract error information if the job failed
@@ -236,6 +263,8 @@ impl JobsModel {
             }
 
             job.result = Some(result);
+        } else {
+            log::error!("Attempted to complete non-existent job with ID {}", job_id);
         }
     }
 
