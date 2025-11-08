@@ -4,7 +4,8 @@ use crate::tui::model::{
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
@@ -133,75 +134,192 @@ fn render_job_details(f: &mut Frame, job: &JobState) {
     let can_retry = matches!(job.status, JobStatus::Failed | JobStatus::Completed)
         && job.retry_context.is_some();
 
-    let retry_hint = if can_retry {
-        "\n\nPress 'r' to retry this job"
-    } else if matches!(job.status, JobStatus::Failed | JobStatus::Completed) {
-        "\n\n(Cannot retry: missing context)"
-    } else {
-        ""
-    };
+    // Calculate max width for text wrapping (popup width - borders (2) - some margin (4))
+    let max_text_width = area.width.saturating_sub(6) as usize;
 
-    let details = if let Some(ref result) = job.result {
+    // Style constants
+    let label_style = Style::default().fg(Color::Rgb(255, 191, 0)); // Amber color
+    let value_style = Style::default().fg(Color::White);
+
+    let mut lines = vec![Line::from("")]; // Empty line for top padding
+
+    // Status line with colored status value
+    lines.push(Line::from(vec![
+        Span::styled("  Status: ", label_style),
+        Span::styled(
+            job.status.as_str(),
+            Style::default()
+                .fg(job.status.color())
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    if let Some(ref result) = job.result {
+        // Workspace line
+        lines.push(Line::from(vec![
+            Span::styled("  Workspace: ", label_style),
+            Span::styled(
+                format!("{} ({})", result.workspace_name, job.workspace_name),
+                value_style,
+            ),
+        ]));
+
+        // Workspace ID line
+        lines.push(Line::from(vec![
+            Span::styled("  Workspace ID: ", label_style),
+            Span::styled(&result.workspace_id, value_style),
+        ]));
+
+        // Query line - label on its own line, then indented wrapped content
+        lines.push(Line::from(Span::styled("  Query:", label_style)));
+        let wrapped_query = wrap_text_with_indent(&result.query, 4, max_text_width);
+        for wrapped_line in wrapped_query {
+            lines.push(Line::from(Span::styled(wrapped_line, value_style)));
+        }
+
+        // Duration line
+        lines.push(Line::from(vec![
+            Span::styled("  Duration: ", label_style),
+            Span::styled(format!("{:.2}s", result.elapsed.as_secs_f64()), value_style),
+        ]));
+
+        // Timestamp line
+        lines.push(Line::from(vec![
+            Span::styled("  Timestamp: ", label_style),
+            Span::styled(result.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(), value_style),
+        ]));
+
         match &result.result {
-            Ok(success) => format!(
-                "Status: {}\n\
-                 Workspace: {} ({})\n\
-                 Workspace ID: {}\n\
-                 Query: {}\n\
-                 Duration: {:.2}s\n\
-                 Rows: {}\n\
-                 Output: {}\n\
-                 Size: {} bytes{}",
-                job.status.as_str(),
-                result.workspace_name,
-                job.workspace_name,
-                result.workspace_id,
-                result.query,
-                result.elapsed.as_secs_f64(),
-                success.row_count,
-                success.output_path.display(),
-                success.file_size,
-                retry_hint
-            ),
-            Err(e) => format!(
-                "Status: FAILED\n\
-                 Workspace: {} ({})\n\
-                 Workspace ID: {}\n\
-                 Query: {}\n\
-                 Duration: {:.2}s\n\
-                 Error: {}{}",
-                result.workspace_name,
-                job.workspace_name,
-                result.workspace_id,
-                result.query,
-                result.elapsed.as_secs_f64(),
-                e,
-                retry_hint
-            ),
+            Ok(success) => {
+                // Rows line
+                lines.push(Line::from(vec![
+                    Span::styled("  Rows: ", label_style),
+                    Span::styled(success.row_count.to_string(), value_style),
+                ]));
+
+                // Output line
+                lines.push(Line::from(vec![
+                    Span::styled("  Output: ", label_style),
+                    Span::styled(success.output_path.display().to_string(), value_style),
+                ]));
+
+                // Size line
+                lines.push(Line::from(vec![
+                    Span::styled("  Size: ", label_style),
+                    Span::styled(format!("{} bytes", success.file_size), value_style),
+                ]));
+            }
+            Err(_) => {
+                // Use structured error if available, otherwise fallback to raw error
+                let error_message = if let Some(ref error) = job.error {
+                    error.detailed_description()
+                } else {
+                    result.result.as_ref().unwrap_err().to_string()
+                };
+
+                // Error label on its own line, then indented wrapped content
+                lines.push(Line::from(Span::styled("  Error:", label_style)));
+                let wrapped_error = wrap_text_with_indent(&error_message, 4, max_text_width);
+                for wrapped_line in wrapped_error {
+                    lines.push(Line::from(Span::styled(
+                        wrapped_line,
+                        Style::default().fg(Color::Red),
+                    )));
+                }
+            }
         }
     } else {
-        format!(
-            "Status: {}\n\
-             Workspace: {}\n\
-             Query: {}{}",
-            job.status.as_str(),
-            job.workspace_name,
-            job.query_preview,
-            retry_hint
-        )
-    };
+        // No result available yet (queued/running)
+        lines.push(Line::from(vec![
+            Span::styled("  Workspace: ", label_style),
+            Span::styled(&job.workspace_name, value_style),
+        ]));
 
-    let paragraph = Paragraph::new(details)
+        // Query preview - label on its own line, then indented wrapped content
+        lines.push(Line::from(Span::styled("  Query:", label_style)));
+        let wrapped_query = wrap_text_with_indent(&job.query_preview, 4, max_text_width);
+        for wrapped_line in wrapped_query {
+            lines.push(Line::from(Span::styled(wrapped_line, value_style)));
+        }
+    }
+
+    // Add retry hint with smart retryability checking
+    if can_retry {
+        lines.push(Line::from(""));
+
+        // Check if error is retryable
+        let (retry_text, retry_color) = if let Some(error) = &job.error {
+            if error.is_retryable() {
+                ("  Press 'r' to retry this job", Color::Yellow)
+            } else {
+                ("  (Cannot retry: query syntax error - fix query first)", Color::DarkGray)
+            }
+        } else {
+            // No error details - allow retry (backwards compatibility)
+            ("  Press 'r' to retry this job", Color::Yellow)
+        };
+
+        lines.push(Line::from(Span::styled(
+            retry_text,
+            Style::default().fg(retry_color),
+        )));
+    } else if matches!(job.status, JobStatus::Failed | JobStatus::Completed) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  (Cannot retry: missing context)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title("Job Details")
                 .style(Style::default().bg(Color::Black)),
-        )
-        .wrap(Wrap { trim: false });
+        );
+        // Note: No .wrap() - we manually wrap text to maintain indentation
 
     f.render_widget(Clear, area);
     f.render_widget(paragraph, area);
+}
+
+/// Helper to wrap text with indentation, respecting line width
+fn wrap_text_with_indent(text: &str, indent: usize, max_width: usize) -> Vec<String> {
+    let mut wrapped_lines = Vec::new();
+    let indent_str = " ".repeat(indent);
+
+    for line in text.lines() {
+        if line.is_empty() {
+            wrapped_lines.push(indent_str.clone());
+            continue;
+        }
+
+        let available_width = max_width.saturating_sub(indent);
+        if available_width == 0 {
+            wrapped_lines.push(format!("{}{}", indent_str, line));
+            continue;
+        }
+
+        let mut remaining = line;
+        while !remaining.is_empty() {
+            if remaining.len() <= available_width {
+                wrapped_lines.push(format!("{}{}", indent_str, remaining));
+                break;
+            }
+
+            // Find a good break point (prefer space)
+            let mut split_at = available_width;
+            if let Some(pos) = remaining[..available_width].rfind(' ') {
+                split_at = pos;
+            }
+
+            wrapped_lines.push(format!("{}{}", indent_str, &remaining[..split_at].trim_end()));
+            remaining = remaining[split_at..].trim_start();
+        }
+    }
+
+    wrapped_lines
 }
 
 /// Helper to create a centered rect

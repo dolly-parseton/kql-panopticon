@@ -65,6 +65,33 @@ struct SubscriptionListResponse {
     value: Vec<Subscription>,
 }
 
+/// Azure API error response structure
+#[derive(Deserialize, Debug)]
+struct AzureErrorResponse {
+    error: AzureError,
+}
+
+#[derive(Deserialize, Debug)]
+struct AzureError {
+    code: Option<String>,
+    message: String,
+    #[serde(default)]
+    details: Vec<AzureErrorDetail>,
+    innererror: Option<AzureInnerError>,
+}
+
+#[derive(Deserialize, Debug)]
+struct AzureErrorDetail {
+    code: Option<String>,
+    message: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct AzureInnerError {
+    code: Option<String>,
+    message: Option<String>,
+}
+
 impl Client {
     /// Create a new client using Azure CLI credentials
     pub fn new() -> Result<Self> {
@@ -196,6 +223,42 @@ impl Client {
         Ok(token.token.secret().to_string())
     }
 
+    /// Parse Azure error response and create a detailed error message
+    fn parse_azure_error(status: u16, error_text: &str, context: &str) -> KqlPanopticonError {
+        // Try to parse as structured Azure error response
+        if let Ok(azure_error) = serde_json::from_str::<AzureErrorResponse>(error_text) {
+            let mut message = azure_error.error.message.clone();
+
+            // Add error code if available
+            if let Some(code) = &azure_error.error.code {
+                message = format!("{}: {}", code, message);
+            }
+
+            // Add inner error details if available
+            if let Some(inner) = &azure_error.error.innererror {
+                if let Some(inner_msg) = &inner.message {
+                    message.push_str(&format!("\n  Details: {}", inner_msg));
+                }
+            }
+
+            // Add additional error details
+            for detail in &azure_error.error.details {
+                message.push_str(&format!("\n  - {}", detail.message));
+            }
+
+            KqlPanopticonError::AzureApiError {
+                status,
+                message: format!("{}: {}", context, message),
+            }
+        } else {
+            // Fallback to raw error text if not structured JSON
+            KqlPanopticonError::AzureApiError {
+                status,
+                message: format!("{}: {}", context, error_text),
+            }
+        }
+    }
+
     /// List all subscriptions the user has access to
     pub async fn list_subscriptions(&self) -> Result<Vec<Subscription>> {
         self.validate_auth().await?;
@@ -263,13 +326,11 @@ impl Client {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let error_text = response.text().await.unwrap_or_default();
-            return Err(KqlPanopticonError::AzureApiError {
+            return Err(Self::parse_azure_error(
                 status,
-                message: format!(
-                    "Query failed for workspace {}: {}",
-                    workspace_id, error_text
-                ),
-            });
+                &error_text,
+                &format!("Query failed for workspace {}", workspace_id),
+            ));
         }
 
         let result: QueryResponse = response
@@ -296,10 +357,7 @@ impl Client {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let error_text = response.text().await.unwrap_or_default();
-            return Err(KqlPanopticonError::AzureApiError {
-                status,
-                message: format!("Pagination failed: {}", error_text),
-            });
+            return Err(Self::parse_azure_error(status, &error_text, "Pagination failed"));
         }
 
         let result: QueryResponse = response

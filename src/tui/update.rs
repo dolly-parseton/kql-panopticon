@@ -599,6 +599,9 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                 retry_ctx.clone(),
             );
 
+            // Auto-select the new job for visibility
+            model.jobs.table_state.select(Some(new_job_idx));
+
             // Mark session as dirty when retrying jobs
             model.sessions.mark_dirty();
 
@@ -632,8 +635,8 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                 }
             });
 
-            // Switch to Jobs tab to show progress
-            vec![Message::SwitchTab(Tab::Jobs)]
+            // Close popup, switch to Jobs tab to show progress
+            vec![Message::ClosePopup, Message::SwitchTab(Tab::Jobs)]
         }
 
         // === Sessions ===
@@ -755,6 +758,8 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
 
                     // Load jobs
                     model.jobs.jobs = session.to_job_states();
+                    // Sort jobs by timestamp (newest first)
+                    model.jobs.sort_by_timestamp();
                     // If jobs were loaded, select the first one
                     if !model.jobs.jobs.is_empty() {
                         model.jobs.table_state.select(Some(0));

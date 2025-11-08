@@ -9,7 +9,7 @@ use ratatui::{
 /// Render the Jobs tab
 pub fn render(f: &mut Frame, model: &mut JobsModel, area: Rect) {
     // Create header
-    let header = Row::new(vec!["Status", "Workspace", "Query", "Duration"])
+    let header = Row::new(vec!["Status", "Workspace", "Query", "Duration", "Timestamp"])
         .style(
             Style::default()
                 .fg(Color::Yellow)
@@ -18,7 +18,7 @@ pub fn render(f: &mut Frame, model: &mut JobsModel, area: Rect) {
         .bottom_margin(1);
 
     // Create rows
-    // Pre-compute duration strings since they're not stored in the model
+    // Pre-compute duration strings, status strings, and timestamp strings
     let duration_strings: Vec<String> = model
         .jobs
         .iter()
@@ -29,16 +29,45 @@ pub fn render(f: &mut Frame, model: &mut JobsModel, area: Rect) {
         })
         .collect();
 
+    let status_strings: Vec<String> = model
+        .jobs
+        .iter()
+        .map(|job| {
+            // For failed jobs, show error description if available
+            if job.status == crate::tui::model::jobs::JobStatus::Failed {
+                if let Some(ref error) = job.error {
+                    format!("FAILED ({})", error.short_description())
+                } else {
+                    job.status.as_str().to_string()
+                }
+            } else {
+                job.status.as_str().to_string()
+            }
+        })
+        .collect();
+
+    let timestamp_strings: Vec<String> = model
+        .jobs
+        .iter()
+        .map(|job| {
+            job.result
+                .as_ref()
+                .map(|r| r.timestamp.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| "-".to_string())
+        })
+        .collect();
+
     let rows: Vec<Row> = model
         .jobs
         .iter()
         .enumerate()
         .map(|(idx, job)| {
             Row::new(vec![
-                job.status.as_str(),
+                status_strings[idx].as_str(),
                 job.workspace_name.as_str(),
                 job.query_preview.as_str(),
                 duration_strings[idx].as_str(),
+                timestamp_strings[idx].as_str(),
             ])
             .style(Style::default().fg(job.status.color()))
         })
@@ -46,10 +75,11 @@ pub fn render(f: &mut Frame, model: &mut JobsModel, area: Rect) {
 
     // Calculate column widths
     let widths = [
-        ratatui::layout::Constraint::Length(12),
-        ratatui::layout::Constraint::Percentage(25),
-        ratatui::layout::Constraint::Percentage(50),
-        ratatui::layout::Constraint::Length(10),
+        ratatui::layout::Constraint::Length(28), // Status - fits "FAILED (Query Error)" etc.
+        ratatui::layout::Constraint::Percentage(20), // Workspace
+        ratatui::layout::Constraint::Percentage(30), // Query
+        ratatui::layout::Constraint::Length(10),     // Duration
+        ratatui::layout::Constraint::Length(19),     // Timestamp - "YYYY-MM-DD HH:MM:SS"
     ];
 
     let table = Table::new(rows, widths)

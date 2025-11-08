@@ -73,6 +73,9 @@ pub struct QueryJobResult {
 
     /// Time taken to execute
     pub elapsed: Duration,
+
+    /// Timestamp when the job completed
+    pub timestamp: DateTime<Local>,
 }
 
 /// Success information for a completed job
@@ -512,6 +515,7 @@ impl QueryJob {
             query: self.query.clone(),
             result,
             elapsed,
+            timestamp: Local::now(),
         }
     }
 

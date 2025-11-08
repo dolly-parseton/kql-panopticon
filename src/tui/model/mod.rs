@@ -110,12 +110,18 @@ impl Model {
 
     /// Process pending job updates from the channel
     pub fn process_job_updates(&mut self) {
+        let mut should_sort = false;
         while let Ok(message) = self.job_update_rx.try_recv() {
             match message {
                 JobUpdateMessage::Completed(job_idx, result) => {
                     self.jobs.complete_job(job_idx, result);
+                    should_sort = true;
                 }
             }
+        }
+        // Sort jobs after all updates are processed
+        if should_sort {
+            self.jobs.sort_by_timestamp();
         }
     }
 }

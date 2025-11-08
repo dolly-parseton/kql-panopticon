@@ -11,6 +11,114 @@ pub struct RetryContext {
     pub settings: QuerySettings,
 }
 
+/// Structured job error information for better user feedback
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum JobError {
+    /// Query timed out
+    Timeout {
+        duration_secs: u64,
+        workspace: String,
+    },
+    /// Authentication failure
+    Authentication {
+        message: String,
+    },
+    /// Query syntax error from Azure
+    QuerySyntax {
+        message: String,
+        details: Option<String>,
+    },
+    /// Network or HTTP error
+    Network {
+        message: String,
+        status_code: Option<u16>,
+    },
+    /// Azure API error
+    AzureApi {
+        status: u16,
+        message: String,
+    },
+    /// General error
+    Other {
+        message: String,
+    },
+}
+
+impl JobError {
+    /// Get a short description for display in job list
+    pub fn short_description(&self) -> String {
+        match self {
+            JobError::Timeout { duration_secs, .. } => {
+                format!("Timeout ({}s)", duration_secs)
+            }
+            JobError::Authentication { .. } => "Auth Failed".to_string(),
+            JobError::QuerySyntax { .. } => "Query Error".to_string(),
+            JobError::Network { status_code, .. } => {
+                if let Some(code) = status_code {
+                    format!("Network Error ({})", code)
+                } else {
+                    "Network Error".to_string()
+                }
+            }
+            JobError::AzureApi { status, .. } => {
+                format!("Azure API Error ({})", status)
+            }
+            JobError::Other { .. } => "Failed".to_string(),
+        }
+    }
+
+    /// Get a detailed description for display in popup/details view
+    pub fn detailed_description(&self) -> String {
+        match self {
+            JobError::Timeout { duration_secs, workspace } => {
+                format!(
+                    "Query timed out after {} seconds on workspace '{}'",
+                    duration_secs, workspace
+                )
+            }
+            JobError::Authentication { message } => {
+                format!("Authentication failed: {}", message)
+            }
+            JobError::QuerySyntax { message, details } => {
+                if let Some(details) = details {
+                    format!("Query syntax error: {}\n\nDetails: {}", message, details)
+                } else {
+                    format!("Query syntax error: {}", message)
+                }
+            }
+            JobError::Network { message, status_code } => {
+                if let Some(code) = status_code {
+                    format!("Network error (HTTP {}): {}", code, message)
+                } else {
+                    format!("Network error: {}", message)
+                }
+            }
+            JobError::AzureApi { status, message } => {
+                format!("Azure API error (status {}): {}", status, message)
+            }
+            JobError::Other { message } => message.clone(),
+        }
+    }
+
+    /// Determine if this error type is worth retrying
+    /// Returns true for transient errors that may recover, false for permanent errors
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            // Transient errors - may recover on retry
+            JobError::Timeout { .. } => true,        // Network/server may recover
+            JobError::Network { .. } => true,        // Connectivity issues are transient
+            JobError::Authentication { .. } => true, // Token may refresh
+            JobError::AzureApi { status, .. } => {
+                // Retry 5xx server errors, not 4xx client errors
+                *status >= 500
+            }
+            // Permanent errors - won't fix themselves
+            JobError::QuerySyntax { .. } => false,   // Query must be fixed first
+            JobError::Other { .. } => false,         // Unknown error - don't retry
+        }
+    }
+}
+
 /// Job execution state
 #[derive(Debug, Clone)]
 pub struct JobState {
@@ -19,6 +127,7 @@ pub struct JobState {
     pub query_preview: String,
     pub duration: Option<Duration>,
     pub result: Option<QueryJobResult>,
+    pub error: Option<JobError>,
     pub retry_context: Option<RetryContext>,
 }
 
@@ -79,6 +188,7 @@ impl JobsModel {
             query_preview,
             duration: None,
             result: None,
+            error: None,
             retry_context: None,
         });
 
@@ -101,6 +211,7 @@ impl JobsModel {
             query_preview,
             duration: None,
             result: None,
+            error: None,
             retry_context: Some(retry_context),
         });
 
@@ -114,12 +225,79 @@ impl JobsModel {
     pub fn complete_job(&mut self, index: usize, result: QueryJobResult) {
         if let Some(job) = self.jobs.get_mut(index) {
             job.duration = Some(result.elapsed);
-            job.status = if result.result.is_ok() {
-                JobStatus::Completed
+
+            // Extract error information if the job failed
+            if let Err(ref err) = result.result {
+                job.status = JobStatus::Failed;
+                job.error = Some(Self::categorize_error(err, &result.workspace_name, result.elapsed));
             } else {
-                JobStatus::Failed
-            };
+                job.status = JobStatus::Completed;
+                job.error = None;
+            }
+
             job.result = Some(result);
+        }
+    }
+
+    /// Categorize a KqlPanopticonError into a JobError for better display
+    pub fn categorize_error(
+        error: &crate::error::KqlPanopticonError,
+        workspace_name: &str,
+        elapsed: Duration,
+    ) -> JobError {
+        use crate::error::KqlPanopticonError;
+
+        match error {
+            KqlPanopticonError::QueryExecutionFailed(msg) => {
+                // Check if this is a timeout error
+                if msg.contains("timed out") || msg.contains("timeout") {
+                    JobError::Timeout {
+                        duration_secs: elapsed.as_secs(),
+                        workspace: workspace_name.to_string(),
+                    }
+                } else {
+                    // Could be a query syntax error
+                    JobError::QuerySyntax {
+                        message: msg.clone(),
+                        details: None,
+                    }
+                }
+            }
+            KqlPanopticonError::AuthenticationFailed(msg)
+            | KqlPanopticonError::TokenAcquisitionFailed(msg) => {
+                JobError::Authentication {
+                    message: msg.clone(),
+                }
+            }
+            KqlPanopticonError::AzureApiError { status, message } => {
+                // Check for specific status codes
+                match *status {
+                    401 | 403 => JobError::Authentication {
+                        message: message.clone(),
+                    },
+                    400 => JobError::QuerySyntax {
+                        message: message.clone(),
+                        details: None,
+                    },
+                    504 => JobError::Timeout {
+                        duration_secs: elapsed.as_secs(),
+                        workspace: workspace_name.to_string(),
+                    },
+                    _ => JobError::AzureApi {
+                        status: *status,
+                        message: message.clone(),
+                    },
+                }
+            }
+            KqlPanopticonError::HttpRequestFailed(msg) => {
+                JobError::Network {
+                    message: msg.clone(),
+                    status_code: None,
+                }
+            }
+            _ => JobError::Other {
+                message: error.to_string(),
+            },
         }
     }
 
@@ -138,6 +316,22 @@ impl JobsModel {
     /// Get the currently selected job
     pub fn get_selected_job(&self) -> Option<&JobState> {
         self.table_state.selected().and_then(|i| self.jobs.get(i))
+    }
+
+    /// Sort jobs by timestamp (newest first)
+    pub fn sort_by_timestamp(&mut self) {
+        self.jobs.sort_by(|a, b| {
+            let timestamp_a = a.result.as_ref().map(|r| r.timestamp);
+            let timestamp_b = b.result.as_ref().map(|r| r.timestamp);
+
+            // Sort descending (newest first) - jobs without timestamps go to the end
+            match (timestamp_a, timestamp_b) {
+                (Some(a), Some(b)) => b.cmp(&a), // Reverse order for descending
+                (Some(_), None) => std::cmp::Ordering::Less,    // Jobs with timestamps come first
+                (None, Some(_)) => std::cmp::Ordering::Greater, // Jobs without timestamps go last
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        });
     }
 }
 

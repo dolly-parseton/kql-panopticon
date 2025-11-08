@@ -7,8 +7,6 @@
 
 A terminal-based tool for executing Kusto Query Language (KQL) queries across multiple Azure Log Analytics workspaces concurrently. Results are exported to CSV files organized by subscription, workspace, and timestamp.
 
-> Note: Another one-shot attempt at a CLI/TUI app. Might be some bugs but should serve it's purpose.
-
 ## Features
 
 - **Multi-workspace querying**: Execute queries across all accessible Log Analytics workspaces in parallel

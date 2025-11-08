@@ -289,11 +289,41 @@ fn handle_popup_key(key: KeyCode, popup: &model::Popup, model: &Model) -> Messag
             KeyCode::Char(c) => Message::SessionNameInputChar(c),
             _ => Message::NoOp,
         },
-        model::Popup::JobDetails(_) => {
-            if matches!(key, KeyCode::Esc | KeyCode::Enter) {
-                Message::ClosePopup
-            } else {
-                Message::NoOp
+        model::Popup::JobDetails(job_idx) => {
+            match key {
+                KeyCode::Esc | KeyCode::Enter => Message::ClosePopup,
+                KeyCode::Char('r') => {
+                    // Validate that the job can and should be retried
+                    if let Some(job) = model.jobs.jobs.get(*job_idx) {
+                        use crate::tui::model::jobs::JobStatus;
+
+                        // Check basic retry eligibility
+                        let can_retry = matches!(job.status, JobStatus::Failed | JobStatus::Completed)
+                            && job.retry_context.is_some();
+
+                        if !can_retry {
+                            return Message::ShowError(
+                                "Job cannot be retried (missing context)".to_string()
+                            );
+                        }
+
+                        // Check if error type is retryable
+                        if let Some(error) = &job.error {
+                            if !error.is_retryable() {
+                                return Message::ShowError(
+                                    "Cannot retry: query syntax error - fix query first".to_string()
+                                );
+                            }
+                        }
+
+                        // Error is retryable - close popup and trigger retry
+                        // Note: We can't return Vec<Message> from this function,
+                        // so we'll just trigger retry and let the update handler close the popup
+                        return Message::JobsRetry;
+                    }
+                    Message::NoOp
+                }
+                _ => Message::NoOp,
             }
         }
     }

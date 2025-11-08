@@ -1,6 +1,6 @@
 [package]
 name = "kql-panopticon"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["dolly-parseton"]
 description = "Terminal UI for executing KQL queries across multiple Azure Log Analytics workspaces concurrently with CSV/JSON export"

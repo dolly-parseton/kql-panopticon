@@ -1,6 +1,6 @@
 use crate::error::KqlPanopticonError;
 use crate::query_job::{QueryJobResult, QuerySettings};
-use crate::tui::model::jobs::{JobState, JobStatus, RetryContext};
+use crate::tui::model::jobs::{JobState, JobStatus, JobsModel, RetryContext};
 use crate::tui::model::settings::SettingsModel;
 use crate::workspace::Workspace;
 use serde::{Deserialize, Serialize};
@@ -64,7 +64,10 @@ pub struct SerializableJob {
     pub workspace: Option<Workspace>,
     pub query: Option<String>,
     pub settings: Option<QuerySettings>,
-    pub error_message: Option<String>,
+    pub error_message: Option<String>, // Kept for backwards compatibility
+    pub error_details: Option<crate::tui::model::jobs::JobError>, // Structured error (v2+)
+    #[serde(default)]
+    pub timestamp: Option<String>, // ISO 8601 / RFC3339 format
 }
 
 impl From<&JobState> for SerializableJob {
@@ -85,6 +88,15 @@ impl From<&JobState> for SerializableJob {
             .and_then(|r| r.result.as_ref().err())
             .map(|e| e.to_string());
 
+        // Capture structured error details
+        let error_details = job.error.clone();
+
+        // Extract timestamp from result if available
+        let timestamp = job
+            .result
+            .as_ref()
+            .map(|r| r.timestamp.to_rfc3339());
+
         Self {
             status: job.status.as_str().to_string(),
             workspace_name: job.workspace_name.clone(),
@@ -94,6 +106,8 @@ impl From<&JobState> for SerializableJob {
             query,
             settings,
             error_message,
+            error_details,
+            timestamp,
         }
     }
 }
@@ -218,31 +232,61 @@ impl Session {
 
                 let duration = job.duration_millis.map(Duration::from_millis);
 
-                // Reconstruct result if we have error info
-                let result = if let Some(err) = &job.error_message {
-                    Some(QueryJobResult {
-                        workspace_id: job.workspace.as_ref().map(|w| w.workspace_id.clone()).unwrap_or_default(),
-                        workspace_name: job.workspace_name.clone(),
-                        query: job.query.clone().unwrap_or_default(),
-                        result: Err(KqlPanopticonError::QueryExecutionFailed(err.clone())),
-                        elapsed: duration.unwrap_or_default(),
-                    })
+                // Parse timestamp from ISO 8601 / RFC3339 format, or use current time as fallback
+                let timestamp = job
+                    .timestamp
+                    .as_ref()
+                    .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Local))
+                    .unwrap_or_else(|| chrono::Local::now());
+
+                // Reconstruct result and error info
+                let (result, error) = if let Some(err) = &job.error_message {
+                    let kql_error = KqlPanopticonError::QueryExecutionFailed(err.clone());
+
+                    // Prefer structured error details if available (v2+), otherwise re-categorize (v1)
+                    let job_error = if let Some(error_details) = &job.error_details {
+                        error_details.clone()
+                    } else {
+                        // Backwards compatibility: re-categorize from error message
+                        JobsModel::categorize_error(
+                            &kql_error,
+                            &job.workspace_name,
+                            duration.unwrap_or_default(),
+                        )
+                    };
+
+                    (
+                        Some(QueryJobResult {
+                            workspace_id: job.workspace.as_ref().map(|w| w.workspace_id.clone()).unwrap_or_default(),
+                            workspace_name: job.workspace_name.clone(),
+                            query: job.query.clone().unwrap_or_default(),
+                            result: Err(kql_error),
+                            elapsed: duration.unwrap_or_default(),
+                            timestamp,
+                        }),
+                        Some(job_error),
+                    )
                 } else if status == JobStatus::Completed {
                     // Completed jobs - create success result placeholder
-                    Some(QueryJobResult {
-                        workspace_id: job.workspace.as_ref().map(|w| w.workspace_id.clone()).unwrap_or_default(),
-                        workspace_name: job.workspace_name.clone(),
-                        query: job.query.clone().unwrap_or_default(),
-                        result: Ok(crate::query_job::JobSuccess {
-                            row_count: 0, // We don't save row count, but it's not critical
-                            page_count: 1, // Default to 1 page
-                            output_path: PathBuf::from(""),
-                            file_size: 0,
+                    (
+                        Some(QueryJobResult {
+                            workspace_id: job.workspace.as_ref().map(|w| w.workspace_id.clone()).unwrap_or_default(),
+                            workspace_name: job.workspace_name.clone(),
+                            query: job.query.clone().unwrap_or_default(),
+                            result: Ok(crate::query_job::JobSuccess {
+                                row_count: 0, // We don't save row count, but it's not critical
+                                page_count: 1, // Default to 1 page
+                                output_path: PathBuf::from(""),
+                                file_size: 0,
+                            }),
+                            elapsed: duration.unwrap_or_default(),
+                            timestamp,
                         }),
-                        elapsed: duration.unwrap_or_default(),
-                    })
+                        None,
+                    )
                 } else {
-                    None
+                    (None, None)
                 };
 
                 JobState {
@@ -251,6 +295,7 @@ impl Session {
                     query_preview: job.query_preview.clone(),
                     duration,
                     result,
+                    error,
                     retry_context,
                 }
             })
