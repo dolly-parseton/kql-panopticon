@@ -2,7 +2,9 @@ use crate::query_job::{QueryJobBuilder, QueryJobResult, QuerySettings};
 use crate::tui::message::{Message, Tab};
 use crate::tui::model::{query::EditorMode, Model, Popup};
 use log::error;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 
 /// Sanitize a string to be safe for use as a filename
 fn sanitize_filename(name: &str) -> String {
@@ -624,6 +626,10 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
             model.jobs.clear_completed();
             // Mark session as dirty when jobs are cleared
             model.sessions.mark_dirty();
+            // Close job details popup if it was open, as indices have shifted
+            if matches!(model.popup, Some(Popup::JobDetails(_))) {
+                model.popup = None;
+            }
             vec![]
         }
 
@@ -769,6 +775,17 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
             // This ensures we capture the latest state of all jobs, including
             // completion messages that may have arrived while the UI was busy
             model.process_job_updates();
+
+            // Warn if there are running jobs that might complete after save
+            let running_count = model.jobs.jobs.iter()
+                .filter(|j| matches!(j.status, crate::tui::model::jobs::JobStatus::Running))
+                .count();
+            if running_count > 0 {
+                log::warn!(
+                    "Saving session '{}' with {} running jobs - state may be inconsistent",
+                    session_name, running_count
+                );
+            }
 
             // Create or update session
             let mut session = crate::session::Session::new_with_pack(
@@ -1067,14 +1084,24 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
 
                     log::info!("Spawning {} tasks for pack execution", job_ids.len());
 
+                    // Create semaphore to limit concurrent query execution
+                    // This prevents resource exhaustion with large packs across many workspaces
+                    const MAX_CONCURRENT_QUERIES: usize = 15;
+                    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_QUERIES));
+
                     // Spawn individual tasks for each job using stable job IDs
                     for (job_id, retry_ctx) in job_ids {
                         let client = client.clone();
                         let tx = update_tx.clone();
+                        let semaphore = semaphore.clone();
 
                         log::debug!("Spawning task for job ID {}", job_id);
 
                         tokio::spawn(async move {
+                            // Acquire semaphore permit before executing query
+                            let _permit = semaphore.acquire().await.expect("Semaphore closed");
+                            log::debug!("Job {} acquired semaphore permit, executing", job_id);
+
                             // Clone retry_ctx for error cases (will be moved into builder)
                             let retry_ctx_for_errors = retry_ctx.clone();
 
@@ -1118,6 +1145,7 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                                     ));
                                 }
                             }
+                            // Permit is automatically released when _permit is dropped
                         });
                     }
 

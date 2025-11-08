@@ -3,7 +3,7 @@ use crate::tui::model::{
     Popup,
 };
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
@@ -303,11 +303,19 @@ fn render_job_details(f: &mut Frame, job: &JobState) {
 }
 
 /// Helper to wrap text with indentation, respecting line width
+/// Truncates to maximum 1000 lines to prevent UI slowdown with extremely long errors
 fn wrap_text_with_indent(text: &str, indent: usize, max_width: usize) -> Vec<String> {
+    const MAX_LINES: usize = 1000;
     let mut wrapped_lines = Vec::new();
     let indent_str = " ".repeat(indent);
 
     for line in text.lines() {
+        // Check if we've hit the line limit
+        if wrapped_lines.len() >= MAX_LINES {
+            wrapped_lines.push(format!("{}... (output truncated after {} lines)", indent_str, MAX_LINES));
+            break;
+        }
+
         if line.is_empty() {
             wrapped_lines.push(indent_str.clone());
             continue;
@@ -321,6 +329,12 @@ fn wrap_text_with_indent(text: &str, indent: usize, max_width: usize) -> Vec<Str
 
         let mut remaining = line;
         while !remaining.is_empty() {
+            // Check line limit before adding each wrapped segment
+            if wrapped_lines.len() >= MAX_LINES {
+                wrapped_lines.push(format!("{}... (output truncated after {} lines)", indent_str, MAX_LINES));
+                return wrapped_lines;
+            }
+
             if remaining.len() <= available_width {
                 wrapped_lines.push(format!("{}{}", indent_str, remaining));
                 break;
@@ -340,23 +354,28 @@ fn wrap_text_with_indent(text: &str, indent: usize, max_width: usize) -> Vec<Str
     wrapped_lines
 }
 
-/// Helper to create a centered rect
+/// Helper to create a centered rect with minimum size validation
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
+    // Define minimum popup dimensions to prevent layout panics
+    const MIN_POPUP_WIDTH: u16 = 20;
+    const MIN_POPUP_HEIGHT: u16 = 10;
 
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
+    // Calculate target dimensions based on percentages
+    let target_width = (r.width * percent_x) / 100;
+    let target_height = (r.height * percent_y) / 100;
+
+    // Use actual dimensions or fall back to minimum safe size
+    let actual_width = target_width.max(MIN_POPUP_WIDTH).min(r.width);
+    let actual_height = target_height.max(MIN_POPUP_HEIGHT).min(r.height);
+
+    // Calculate centering offsets
+    let x_offset = r.x + (r.width.saturating_sub(actual_width)) / 2;
+    let y_offset = r.y + (r.height.saturating_sub(actual_height)) / 2;
+
+    Rect {
+        x: x_offset,
+        y: y_offset,
+        width: actual_width,
+        height: actual_height,
+    }
 }

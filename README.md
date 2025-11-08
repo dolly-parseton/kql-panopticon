@@ -88,7 +88,7 @@ kql-panopticon
 
 The application will:
 1. Validate Azure CLI authentication
-2. Load saved sessions from `~/.kql-panopticon/sessions/`
+2. Load saved sessions from the config directory
 3. Discover all accessible Log Analytics workspaces
 4. Open to the Settings tab
 
@@ -364,7 +364,7 @@ Save and load complete application state including jobs, queries, and settings.
 - `p`: Export selected session as query pack
   - Converts session to reusable pack format
   - Deduplicates queries across workspaces
-  - Saves to `~/.kql-panopticon/packs/`
+  - Saves to packs directory
 
 **Session Information:**
 Each session displays:
@@ -377,7 +377,7 @@ Each session displays:
 - Last saved timestamp
 - Pack origin (if created from a query pack)
 
-Sessions are stored in `~/.kql-panopticon/sessions/` as JSON files.
+Sessions are stored in the config directory's `sessions/` subdirectory as JSON files.
 
 ### 6. Packs Tab
 
@@ -398,7 +398,7 @@ Each pack shows:
 - Number of queries
 - File path
 
-Packs are loaded from `~/.kql-panopticon/packs/` (supports subdirectories).
+Packs are loaded from the config directory's `packs/` subdirectory (supports subdirectories).
 
 ## Output Format
 
@@ -507,7 +507,7 @@ Increase the timeout value in Settings tab or optimize your query.
 Check `kql-panopticon.log` for error details. The job may have exceeded the timeout or encountered a network error.
 
 **Sessions not appearing on startup:**
-Ensure session files exist in `~/.kql-panopticon/sessions/`. Press `r` in the Sessions tab to manually refresh the list.
+Ensure session files exist in the config directory's `sessions/` subdirectory. Press `r` in the Sessions tab to manually refresh the list.
 
 **Query pack validation fails:**
 Ensure pack has either `query` field (single query) or `queries` array (multiple queries), but not both. Use `--validate-only` flag to check.
@@ -567,8 +567,10 @@ Generate query packs using AI assistants. Validate and execute in one command. I
 
 ## File Organization
 
+Configuration and data stored in home directory (on macOS/Linux: `~/.kql-panopticon/`, on Windows: `%USERPROFILE%\.kql-panopticon\`):
+
 ```
-~/.kql-panopticon/
+.kql-panopticon/
 ├── packs/                    # Query pack library
 │   ├── security/
 │   │   ├── failed-auth.yaml

@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "kql-panopticon"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "azure_core",

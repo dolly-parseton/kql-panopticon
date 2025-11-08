@@ -8,6 +8,23 @@ use std::time::{Duration, Instant};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
+/// Generate a unique temp file path to avoid collisions during concurrent executions
+fn generate_unique_temp_path(base_path: &PathBuf, extension: &str) -> PathBuf {
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+    let pid = std::process::id();
+
+    // Create unique temp filename: base.tmp.{timestamp}_{pid}.{extension}
+    let mut temp_path = base_path.clone();
+    let temp_filename = format!("{}.tmp.{}_{}.{}",
+        base_path.file_stem().unwrap_or_default().to_string_lossy(),
+        timestamp,
+        pid,
+        extension
+    );
+    temp_path.set_file_name(temp_filename);
+    temp_path
+}
+
 /// Settings for query execution
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -206,6 +223,31 @@ impl StreamingCsvWriter {
         }
         Ok(())
     }
+
+    /// Save partial results when pagination fails
+    async fn save_partial(mut self, output_path: &PathBuf) -> Result<(usize, PathBuf)> {
+        // Flush any remaining buffered data
+        self.flush().await?;
+
+        // Ensure all data is written to disk
+        self.file.sync_all().await?;
+
+        // Close the file
+        drop(self.file);
+
+        // Create partial result filename
+        let partial_path = output_path.with_extension("partial.csv");
+
+        // Move temp file to partial location
+        tokio::fs::rename(&self.temp_path, &partial_path).await?;
+
+        warn!(
+            "Saved partial results ({} rows, {} pages) to: {}",
+            self.row_count, self.page_count, partial_path.display()
+        );
+
+        Ok((self.row_count, partial_path))
+    }
 }
 
 /// Helper for streaming JSON writes to a temporary file
@@ -357,6 +399,64 @@ impl StreamingJsonWriter {
             tokio::fs::remove_file(&self.temp_path).await?;
         }
         Ok(())
+    }
+
+    /// Save partial results when pagination fails
+    async fn save_partial(
+        mut self,
+        output_path: &PathBuf,
+        workspace: &Workspace,
+        timestamp: &str,
+        query: &str,
+    ) -> Result<(usize, PathBuf)> {
+        // Flush any remaining buffered data
+        self.flush().await?;
+
+        // Close the temp file
+        drop(self.file);
+
+        // Read all rows from temp file
+        let temp_content = tokio::fs::read_to_string(&self.temp_path).await?;
+        let rows: Vec<serde_json::Value> = temp_content
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).unwrap_or(serde_json::Value::Null))
+            .collect();
+
+        // Build partial JSON output with metadata indicating incompleteness
+        let output = serde_json::json!({
+            "workspace": {
+                "name": workspace.name,
+                "id": workspace.workspace_id,
+                "resource_group": workspace.resource_group,
+                "subscription_id": workspace.subscription_id,
+                "subscription_name": workspace.subscription_name,
+            },
+            "query": query,
+            "timestamp": timestamp,
+            "partial": true,
+            "rows_retrieved": self.row_count,
+            "pages_retrieved": self.page_count,
+            "note": "This result is incomplete due to pagination failure. Only partial data is available.",
+            "rows": rows,
+        });
+
+        // Create partial result filename
+        let partial_path = output_path.with_extension("partial.json");
+
+        // Write partial JSON to destination
+        let json_content = serde_json::to_string_pretty(&output)?;
+        tokio::fs::write(&partial_path, json_content).await?;
+
+        // Clean up temp file
+        tokio::fs::remove_file(&self.temp_path).await?;
+
+        warn!(
+            "Saved partial results ({} rows, {} pages) to: {}",
+            self.row_count, self.page_count, partial_path.display()
+        );
+
+        Ok((self.row_count, partial_path))
     }
 
     /// Recursively parse dynamic values that might be JSON strings
@@ -595,8 +695,8 @@ impl QueryJob {
 
     /// Write query response to CSV file with streaming and pagination
     async fn write_csv_streaming(&self, client: &Client, output_path: &PathBuf) -> Result<(usize, usize)> {
-        // Create temp file path
-        let temp_path = output_path.with_extension("tmp.csv");
+        // Create unique temp file path to avoid collisions during concurrent executions
+        let temp_path = generate_unique_temp_path(output_path, "csv");
 
         // Buffer 100 pages before flushing to disk (adjustable)
         const PAGE_BUFFER_SIZE: usize = 100;
@@ -631,16 +731,20 @@ impl QueryJob {
             response = match tokio::time::timeout(timeout, page_future).await {
                 Ok(Ok(page)) => page,
                 Ok(Err(e)) => {
-                    // Pagination failed, cleanup and return error
-                    writer.cleanup().await?;
-                    return Err(e);
+                    // Pagination failed, save partial results
+                    let (rows, partial_path) = writer.save_partial(output_path).await?;
+                    return Err(KqlPanopticonError::QueryExecutionFailed(format!(
+                        "Pagination failed after {} rows (saved to {}): {}",
+                        rows, partial_path.display(), e
+                    )));
                 }
                 Err(_) => {
-                    // Timeout, cleanup and return error
-                    writer.cleanup().await?;
-                    return Err(KqlPanopticonError::QueryExecutionFailed(
-                        format!("Pagination request timed out after {} seconds", timeout.as_secs()),
-                    ));
+                    // Timeout, save partial results
+                    let (rows, partial_path) = writer.save_partial(output_path).await?;
+                    return Err(KqlPanopticonError::QueryExecutionFailed(format!(
+                        "Pagination timed out after {} seconds, {} rows retrieved (saved to {})",
+                        timeout.as_secs(), rows, partial_path.display()
+                    )));
                 }
             };
 
@@ -667,8 +771,8 @@ impl QueryJob {
 
     /// Write query response to JSON file with streaming and pagination
     async fn write_json_streaming(&self, client: &Client, output_path: &PathBuf) -> Result<(usize, usize)> {
-        // Create temp file path
-        let temp_path = output_path.with_extension("tmp.json");
+        // Create unique temp file path to avoid collisions during concurrent executions
+        let temp_path = generate_unique_temp_path(output_path, "json");
 
         // Buffer 100 pages before flushing to disk (adjustable)
         const PAGE_BUFFER_SIZE: usize = 100;
@@ -708,16 +812,30 @@ impl QueryJob {
             response = match tokio::time::timeout(timeout, page_future).await {
                 Ok(Ok(page)) => page,
                 Ok(Err(e)) => {
-                    // Pagination failed, cleanup and return error
-                    writer.cleanup().await?;
-                    return Err(e);
+                    // Pagination failed, save partial results
+                    let (rows, partial_path) = writer.save_partial(
+                        output_path,
+                        &self.workspace,
+                        &self.timestamp,
+                        &self.query
+                    ).await?;
+                    return Err(KqlPanopticonError::QueryExecutionFailed(format!(
+                        "Pagination failed after {} rows (saved to {}): {}",
+                        rows, partial_path.display(), e
+                    )));
                 }
                 Err(_) => {
-                    // Timeout, cleanup and return error
-                    writer.cleanup().await?;
-                    return Err(KqlPanopticonError::QueryExecutionFailed(
-                        format!("Pagination request timed out after {} seconds", timeout.as_secs()),
-                    ));
+                    // Timeout, save partial results
+                    let (rows, partial_path) = writer.save_partial(
+                        output_path,
+                        &self.workspace,
+                        &self.timestamp,
+                        &self.query
+                    ).await?;
+                    return Err(KqlPanopticonError::QueryExecutionFailed(format!(
+                        "Pagination timed out after {} seconds, {} rows retrieved (saved to {})",
+                        timeout.as_secs(), rows, partial_path.display()
+                    )));
                 }
             };
 
@@ -757,14 +875,30 @@ impl QueryJob {
 
         for attempt in 0..max_attempts {
             if attempt > 0 {
-                debug!(
-                    "Retrying query on workspace '{}' (attempt {}/{})",
-                    self.workspace.name,
-                    attempt + 1,
-                    max_attempts
-                );
-                // Exponential backoff: 1s, 2s, 4s, 8s, etc.
-                let backoff = Duration::from_secs(2u64.pow(attempt - 1));
+                // Determine backoff duration based on last error
+                let backoff = match &last_error {
+                    Some(KqlPanopticonError::RateLimitExceeded { retry_after }) => {
+                        // Use Azure's specified retry-after time
+                        info!(
+                            "Rate limited on workspace '{}'. Waiting {} seconds before retry (attempt {}/{})",
+                            self.workspace.name,
+                            retry_after,
+                            attempt + 1,
+                            max_attempts
+                        );
+                        Duration::from_secs(*retry_after)
+                    }
+                    _ => {
+                        // Standard exponential backoff: 1s, 2s, 4s, 8s, etc.
+                        debug!(
+                            "Retrying query on workspace '{}' (attempt {}/{})",
+                            self.workspace.name,
+                            attempt + 1,
+                            max_attempts
+                        );
+                        Duration::from_secs(2u64.pow(attempt - 1))
+                    }
+                };
                 tokio::time::sleep(backoff).await;
             }
 

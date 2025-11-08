@@ -137,52 +137,61 @@ async fn run_app(
 
         // Handle events with timeout (50ms for smooth spinner animation)
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                let message = handle_key_event(key.code, key.modifiers, model);
+            match event::read()? {
+                Event::Key(key) => {
+                    let message = handle_key_event(key.code, key.modifiers, model);
 
-                // Process the message and any subsequent messages
-                let mut messages_to_process = vec![message];
-                while let Some(msg) = messages_to_process.pop() {
-                    // Check for quit
-                    if matches!(msg, Message::Quit) {
-                        return Ok(());
-                    }
-
-                    // Handle workspace refresh (async operation)
-                    if matches!(msg, Message::WorkspacesRefresh) {
-                        match model.client.list_workspaces().await {
-                            Ok(workspaces) => {
-                                messages_to_process.push(Message::WorkspacesLoaded(workspaces));
-                            }
-                            Err(e) => {
-                                messages_to_process.push(Message::ShowError(format!(
-                                    "Failed to refresh workspaces: {}",
-                                    e
-                                )));
-                            }
+                    // Process the message and any subsequent messages
+                    let mut messages_to_process = vec![message];
+                    while let Some(msg) = messages_to_process.pop() {
+                        // Check for quit
+                        if matches!(msg, Message::Quit) {
+                            return Ok(());
                         }
-                        continue;
-                    }
 
-                    // Handle sessions refresh (load from disk)
-                    if matches!(msg, Message::SessionsRefresh) {
-                        match crate::session::Session::list_all() {
-                            Ok(sessions) => {
-                                model.sessions.refresh_from_disk(sessions);
+                        // Handle workspace refresh (async operation)
+                        if matches!(msg, Message::WorkspacesRefresh) {
+                            match model.client.list_workspaces().await {
+                                Ok(workspaces) => {
+                                    messages_to_process.push(Message::WorkspacesLoaded(workspaces));
+                                }
+                                Err(e) => {
+                                    messages_to_process.push(Message::ShowError(format!(
+                                        "Failed to refresh workspaces: {}",
+                                        e
+                                    )));
+                                }
                             }
-                            Err(e) => {
-                                messages_to_process.push(Message::ShowError(format!(
-                                    "Failed to refresh sessions: {}",
-                                    e
-                                )));
-                            }
+                            continue;
                         }
-                        continue;
-                    }
 
-                    // Update model and collect new messages
-                    let new_messages = update::update(model, msg);
-                    messages_to_process.extend(new_messages);
+                        // Handle sessions refresh (load from disk)
+                        if matches!(msg, Message::SessionsRefresh) {
+                            match crate::session::Session::list_all() {
+                                Ok(sessions) => {
+                                    model.sessions.refresh_from_disk(sessions);
+                                }
+                                Err(e) => {
+                                    messages_to_process.push(Message::ShowError(format!(
+                                        "Failed to refresh sessions: {}",
+                                        e
+                                    )));
+                                }
+                            }
+                            continue;
+                        }
+
+                        // Update model and collect new messages
+                        let new_messages = update::update(model, msg);
+                        messages_to_process.extend(new_messages);
+                    }
+                }
+                Event::Resize(_width, _height) => {
+                    // Terminal was resized, force a redraw on next iteration
+                    // The terminal.draw() call will automatically adapt to new size
+                }
+                _ => {
+                    // Ignore other events (mouse, etc.)
                 }
             }
         }

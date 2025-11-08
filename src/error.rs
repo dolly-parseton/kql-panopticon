@@ -11,11 +11,14 @@ pub enum KqlPanopticonError {
     #[error("HTTP request failed: {0}")]
     HttpRequestFailed(String),
 
-    #[error("Failed to parse JSON response: {0}")]
-    JsonParseFailed(String),
+    #[error("Failed to parse response: {0}")]
+    ParseFailed(String),
 
     #[error("Azure API error (status {status}): {message}")]
     AzureApiError { status: u16, message: String },
+
+    #[error("Azure API rate limit exceeded. Retry after {retry_after} seconds")]
+    RateLimitExceeded { retry_after: u64 },
 
     #[error("Workspace not found: {0}")]
     WorkspaceNotFound(String),
@@ -65,13 +68,13 @@ impl From<anyhow::Error> for KqlPanopticonError {
 
 impl From<serde_json::Error> for KqlPanopticonError {
     fn from(err: serde_json::Error) -> Self {
-        KqlPanopticonError::JsonParseFailed(err.to_string())
+        KqlPanopticonError::ParseFailed(format!("JSON: {}", err))
     }
 }
 
 impl From<serde_yaml::Error> for KqlPanopticonError {
     fn from(err: serde_yaml::Error) -> Self {
-        KqlPanopticonError::JsonParseFailed(err.to_string())
+        KqlPanopticonError::ParseFailed(format!("YAML: {}", err))
     }
 }
 
