@@ -7,6 +7,20 @@
 
 A terminal-based tool for executing Kusto Query Language (KQL) queries across multiple Azure Log Analytics workspaces concurrently. Features an interactive TUI, reusable query packs, session management, and organized CSV/JSON exports.
 
+## Screenshots
+
+### Query Pack Browser
+![Packs Tab](docs/images/01-packs-tab.png)
+*Browse and execute reusable query packs from your library*
+
+### Vim-Style Query Editor
+![Query Editor](docs/images/04-query-editor.png)
+*Edit queries with Normal, Insert, and Visual modes*
+
+### Job Monitoring
+![Job Details](docs/images/07-job-details.png)
+*Monitor query execution with detailed job information and organized output*
+
 ## Features
 
 ### Core Capabilities
