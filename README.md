@@ -606,12 +606,3 @@ This application uses Unicode box-drawing characters for the TUI interface. For 
 - **Older terminals** - May have similar Unicode rendering limitations
 
 If you experience visual issues with borders, consider switching to one of the recommended terminal emulators.
-
-## Roadmap
-
-- [ ] Query pack variables/parameters support
-- [ ] Session auto-save
-- [ ] Query result diff/comparison
-- [ ] Export to additional formats (Excel, Parquet)
-- [ ] Query history search
-- [ ] Pack composition/inheritance

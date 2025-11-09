@@ -25,17 +25,11 @@ pub fn render(f: &mut Frame, model: &mut Model, area: Rect) {
             let status_cell =
                 Cell::from(session.state.indicator()).style(Style::default().fg(fg_color));
 
-            let last_saved = session
-                .last_saved
-                .as_deref()
-                .unwrap_or("Never");
+            let last_saved = session.last_saved.as_deref().unwrap_or("Never");
             let saved_cell = Cell::from(last_saved).style(Style::default().fg(fg_color));
 
             // Pack origin cell
-            let pack_origin = session
-                .created_from_pack
-                .as_deref()
-                .unwrap_or("-");
+            let pack_origin = session.created_from_pack.as_deref().unwrap_or("-");
             let pack_cell = Cell::from(pack_origin).style(Style::default().fg(fg_color));
 
             Row::new(vec![name_cell, status_cell, saved_cell, pack_cell])

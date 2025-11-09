@@ -96,7 +96,9 @@ impl PacksModel {
 
     /// Get the currently selected pack entry (mutable)
     pub fn get_selected_entry_mut(&mut self) -> Option<&mut PackEntry> {
-        self.table_state.selected().and_then(|i| self.packs.get_mut(i))
+        self.table_state
+            .selected()
+            .and_then(|i| self.packs.get_mut(i))
     }
 
     /// Load the pack data for the selected entry (lazy loading)

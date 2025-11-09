@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
-use crate::query_job::QuerySettings;
 use crate::error::Result;
+use crate::query_job::QuerySettings;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// A query pack containing one or more KQL queries
@@ -110,14 +110,14 @@ impl QueryPack {
         // Must have either query or queries
         if self.query.is_none() && self.queries.is_none() {
             return Err(crate::error::KqlPanopticonError::QueryPackValidation(
-                "Query pack must contain either 'query' or 'queries' field".into()
+                "Query pack must contain either 'query' or 'queries' field".into(),
             ));
         }
 
         // Can't have both
         if self.query.is_some() && self.queries.is_some() {
             return Err(crate::error::KqlPanopticonError::QueryPackValidation(
-                "Query pack cannot have both 'query' and 'queries' fields".into()
+                "Query pack cannot have both 'query' and 'queries' fields".into(),
             ));
         }
 
@@ -125,7 +125,7 @@ impl QueryPack {
         if let Some(queries) = &self.queries {
             if queries.is_empty() {
                 return Err(crate::error::KqlPanopticonError::QueryPackValidation(
-                    "Query pack 'queries' array cannot be empty".into()
+                    "Query pack 'queries' array cannot be empty".into(),
                 ));
             }
         }
@@ -135,8 +135,8 @@ impl QueryPack {
 
     /// Get the pack's file path in the standard library location
     pub fn get_library_path(relative_path: &str) -> Result<PathBuf> {
-        let home = dirs::home_dir()
-            .ok_or(crate::error::KqlPanopticonError::HomeDirectoryNotFound)?;
+        let home =
+            dirs::home_dir().ok_or(crate::error::KqlPanopticonError::HomeDirectoryNotFound)?;
 
         Ok(home.join(".kql-panopticon/packs").join(relative_path))
     }

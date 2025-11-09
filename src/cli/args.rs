@@ -2,7 +2,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(name = "kql-panopticon")]
-#[command(version, about = "Execute KQL queries across Azure Log Analytics workspaces")]
+#[command(
+    version,
+    about = "Execute KQL queries across Azure Log Analytics workspaces"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,

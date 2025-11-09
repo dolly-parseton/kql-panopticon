@@ -15,7 +15,8 @@ fn generate_unique_temp_path(base_path: &Path, extension: &str) -> PathBuf {
 
     // Create unique temp filename: base.tmp.{timestamp}_{pid}.{extension}
     let mut temp_path = base_path.to_path_buf();
-    let temp_filename = format!("{}.tmp.{}_{}.{}",
+    let temp_filename = format!(
+        "{}.tmp.{}_{}.{}",
         base_path.file_stem().unwrap_or_default().to_string_lossy(),
         timestamp,
         pid,
@@ -170,10 +171,7 @@ impl StreamingCsvWriter {
         self.page_count += 1;
         for row in &table.rows {
             if let Some(row_array) = row.as_array() {
-                let row_strings: Vec<String> = row_array
-                    .iter()
-                    .map(format_fn)
-                    .collect();
+                let row_strings: Vec<String> = row_array.iter().map(format_fn).collect();
                 self.buffer.push(format!("{}\n", row_strings.join(",")));
                 self.row_count += 1;
             }
@@ -243,7 +241,9 @@ impl StreamingCsvWriter {
 
         warn!(
             "Saved partial results ({} rows, {} pages) to: {}",
-            self.row_count, self.page_count, partial_path.display()
+            self.row_count,
+            self.page_count,
+            partial_path.display()
         );
 
         Ok((self.row_count, partial_path))
@@ -299,11 +299,12 @@ impl StreamingJsonWriter {
                 let mut row_object = serde_json::Map::new();
                 for (idx, value) in row_array.iter().enumerate() {
                     if let Some(column) = columns.get(idx) {
-                        let processed_value = if self.parse_dynamics && column.column_type == "dynamic" {
-                            Self::parse_dynamic_value(value)
-                        } else {
-                            value.clone()
-                        };
+                        let processed_value =
+                            if self.parse_dynamics && column.column_type == "dynamic" {
+                                Self::parse_dynamic_value(value)
+                            } else {
+                                value.clone()
+                            };
                         row_object.insert(column.name.clone(), processed_value);
                     }
                 }
@@ -453,7 +454,9 @@ impl StreamingJsonWriter {
 
         warn!(
             "Saved partial results ({} rows, {} pages) to: {}",
-            self.row_count, self.page_count, partial_path.display()
+            self.row_count,
+            self.page_count,
+            partial_path.display()
         );
 
         Ok((self.row_count, partial_path))
@@ -694,7 +697,11 @@ impl QueryJob {
     }
 
     /// Write query response to CSV file with streaming and pagination
-    async fn write_csv_streaming(&self, client: &Client, output_path: &Path) -> Result<(usize, usize)> {
+    async fn write_csv_streaming(
+        &self,
+        client: &Client,
+        output_path: &Path,
+    ) -> Result<(usize, usize)> {
         // Create unique temp file path to avoid collisions during concurrent executions
         let temp_path = generate_unique_temp_path(output_path, "csv");
 
@@ -706,7 +713,9 @@ impl QueryJob {
         // Execute first query with retry logic
         let timeout = client.query_timeout();
         let retry_count = client.retry_count();
-        let mut response = self.execute_with_retry(client, timeout, retry_count).await?;
+        let mut response = self
+            .execute_with_retry(client, timeout, retry_count)
+            .await?;
 
         if response.tables.is_empty() {
             writer.cleanup().await?;
@@ -728,25 +737,28 @@ impl QueryJob {
             debug!("Fetching next page: {} rows so far", writer.row_count);
 
             let page_future = client.query_next_page(next_link);
-            response = match tokio::time::timeout(timeout, page_future).await {
-                Ok(Ok(page)) => page,
-                Ok(Err(e)) => {
-                    // Pagination failed, save partial results
-                    let (rows, partial_path) = writer.save_partial(output_path).await?;
-                    return Err(KqlPanopticonError::QueryExecutionFailed(format!(
-                        "Pagination failed after {} rows (saved to {}): {}",
-                        rows, partial_path.display(), e
-                    )));
-                }
-                Err(_) => {
-                    // Timeout, save partial results
-                    let (rows, partial_path) = writer.save_partial(output_path).await?;
-                    return Err(KqlPanopticonError::QueryExecutionFailed(format!(
+            response =
+                match tokio::time::timeout(timeout, page_future).await {
+                    Ok(Ok(page)) => page,
+                    Ok(Err(e)) => {
+                        // Pagination failed, save partial results
+                        let (rows, partial_path) = writer.save_partial(output_path).await?;
+                        return Err(KqlPanopticonError::QueryExecutionFailed(format!(
+                            "Pagination failed after {} rows (saved to {}): {}",
+                            rows,
+                            partial_path.display(),
+                            e
+                        )));
+                    }
+                    Err(_) => {
+                        // Timeout, save partial results
+                        let (rows, partial_path) = writer.save_partial(output_path).await?;
+                        return Err(KqlPanopticonError::QueryExecutionFailed(format!(
                         "Pagination timed out after {} seconds, {} rows retrieved (saved to {})",
                         timeout.as_secs(), rows, partial_path.display()
                     )));
-                }
-            };
+                    }
+                };
 
             if !response.tables.is_empty() {
                 let table = &response.tables[0];
@@ -770,7 +782,11 @@ impl QueryJob {
     }
 
     /// Write query response to JSON file with streaming and pagination
-    async fn write_json_streaming(&self, client: &Client, output_path: &Path) -> Result<(usize, usize)> {
+    async fn write_json_streaming(
+        &self,
+        client: &Client,
+        output_path: &Path,
+    ) -> Result<(usize, usize)> {
         // Create unique temp file path to avoid collisions during concurrent executions
         let temp_path = generate_unique_temp_path(output_path, "json");
 
@@ -787,7 +803,9 @@ impl QueryJob {
         // Execute first query with retry logic
         let timeout = client.query_timeout();
         let retry_count = client.retry_count();
-        let mut response = self.execute_with_retry(client, timeout, retry_count).await?;
+        let mut response = self
+            .execute_with_retry(client, timeout, retry_count)
+            .await?;
 
         if response.tables.is_empty() {
             writer.cleanup().await?;
@@ -813,28 +831,26 @@ impl QueryJob {
                 Ok(Ok(page)) => page,
                 Ok(Err(e)) => {
                     // Pagination failed, save partial results
-                    let (rows, partial_path) = writer.save_partial(
-                        output_path,
-                        &self.workspace,
-                        &self.timestamp,
-                        &self.query
-                    ).await?;
+                    let (rows, partial_path) = writer
+                        .save_partial(output_path, &self.workspace, &self.timestamp, &self.query)
+                        .await?;
                     return Err(KqlPanopticonError::QueryExecutionFailed(format!(
                         "Pagination failed after {} rows (saved to {}): {}",
-                        rows, partial_path.display(), e
+                        rows,
+                        partial_path.display(),
+                        e
                     )));
                 }
                 Err(_) => {
                     // Timeout, save partial results
-                    let (rows, partial_path) = writer.save_partial(
-                        output_path,
-                        &self.workspace,
-                        &self.timestamp,
-                        &self.query
-                    ).await?;
+                    let (rows, partial_path) = writer
+                        .save_partial(output_path, &self.workspace, &self.timestamp, &self.query)
+                        .await?;
                     return Err(KqlPanopticonError::QueryExecutionFailed(format!(
                         "Pagination timed out after {} seconds, {} rows retrieved (saved to {})",
-                        timeout.as_secs(), rows, partial_path.display()
+                        timeout.as_secs(),
+                        rows,
+                        partial_path.display()
                     )));
                 }
             };
@@ -902,7 +918,8 @@ impl QueryJob {
                 tokio::time::sleep(backoff).await;
             }
 
-            let query_future = client.query_workspace(&self.workspace.workspace_id, &self.query, None);
+            let query_future =
+                client.query_workspace(&self.workspace.workspace_id, &self.query, None);
             match tokio::time::timeout(timeout, query_future).await {
                 Ok(Ok(response)) => return Ok(response),
                 Ok(Err(e)) => {

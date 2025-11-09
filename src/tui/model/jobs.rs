@@ -20,9 +20,7 @@ pub enum JobError {
         workspace: String,
     },
     /// Authentication failure
-    Authentication {
-        message: String,
-    },
+    Authentication { message: String },
     /// Query syntax error from Azure
     QuerySyntax {
         message: String,
@@ -34,14 +32,9 @@ pub enum JobError {
         status_code: Option<u16>,
     },
     /// Azure API error
-    AzureApi {
-        status: u16,
-        message: String,
-    },
+    AzureApi { status: u16, message: String },
     /// General error
-    Other {
-        message: String,
-    },
+    Other { message: String },
 }
 
 impl JobError {
@@ -70,7 +63,10 @@ impl JobError {
     /// Get a detailed description for display in popup/details view
     pub fn detailed_description(&self) -> String {
         match self {
-            JobError::Timeout { duration_secs, workspace } => {
+            JobError::Timeout {
+                duration_secs,
+                workspace,
+            } => {
                 format!(
                     "Query timed out after {} seconds on workspace '{}'",
                     duration_secs, workspace
@@ -86,7 +82,10 @@ impl JobError {
                     format!("Query syntax error: {}", message)
                 }
             }
-            JobError::Network { message, status_code } => {
+            JobError::Network {
+                message,
+                status_code,
+            } => {
                 if let Some(code) = status_code {
                     format!("Network error (HTTP {}): {}", code, message)
                 } else {
@@ -105,16 +104,16 @@ impl JobError {
     pub fn is_retryable(&self) -> bool {
         match self {
             // Transient errors - may recover on retry
-            JobError::Timeout { .. } => true,        // Network/server may recover
-            JobError::Network { .. } => true,        // Connectivity issues are transient
+            JobError::Timeout { .. } => true, // Network/server may recover
+            JobError::Network { .. } => true, // Connectivity issues are transient
             JobError::Authentication { .. } => true, // Token may refresh
             JobError::AzureApi { status, .. } => {
                 // Retry 5xx server errors, not 4xx client errors
                 *status >= 500
             }
             // Permanent errors - won't fix themselves
-            JobError::QuerySyntax { .. } => false,   // Query must be fixed first
-            JobError::Other { .. } => false,         // Unknown error - don't retry
+            JobError::QuerySyntax { .. } => false, // Query must be fixed first
+            JobError::Other { .. } => false,       // Unknown error - don't retry
         }
     }
 }
@@ -256,7 +255,11 @@ impl JobsModel {
             // Extract error information if the job failed
             if let Err(ref err) = result.result {
                 job.status = JobStatus::Failed;
-                job.error = Some(Self::categorize_error(err, &result.workspace_name, result.elapsed));
+                job.error = Some(Self::categorize_error(
+                    err,
+                    &result.workspace_name,
+                    result.elapsed,
+                ));
             } else {
                 job.status = JobStatus::Completed;
                 job.error = None;
@@ -293,11 +296,9 @@ impl JobsModel {
                 }
             }
             KqlPanopticonError::AuthenticationFailed(msg)
-            | KqlPanopticonError::TokenAcquisitionFailed(msg) => {
-                JobError::Authentication {
-                    message: msg.clone(),
-                }
-            }
+            | KqlPanopticonError::TokenAcquisitionFailed(msg) => JobError::Authentication {
+                message: msg.clone(),
+            },
             KqlPanopticonError::AzureApiError { status, message } => {
                 // Check for specific status codes
                 match *status {
@@ -318,12 +319,10 @@ impl JobsModel {
                     },
                 }
             }
-            KqlPanopticonError::HttpRequestFailed(msg) => {
-                JobError::Network {
-                    message: msg.clone(),
-                    status_code: None,
-                }
-            }
+            KqlPanopticonError::HttpRequestFailed(msg) => JobError::Network {
+                message: msg.clone(),
+                status_code: None,
+            },
             _ => JobError::Other {
                 message: error.to_string(),
             },
@@ -356,7 +355,7 @@ impl JobsModel {
             // Sort descending (newest first) - jobs without timestamps go to the end
             match (timestamp_a, timestamp_b) {
                 (Some(a), Some(b)) => b.cmp(&a), // Reverse order for descending
-                (Some(_), None) => std::cmp::Ordering::Less,    // Jobs with timestamps come first
+                (Some(_), None) => std::cmp::Ordering::Less, // Jobs with timestamps come first
                 (None, Some(_)) => std::cmp::Ordering::Greater, // Jobs without timestamps go last
                 (None, None) => std::cmp::Ordering::Equal,
             }

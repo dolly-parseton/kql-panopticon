@@ -1,11 +1,11 @@
+use crate::cli::args::OutputFormat;
 use crate::{
     client::Client,
     error::Result,
-    query_pack::{QueryPack, WorkspaceScope},
     query_job::{QueryJobBuilder, QueryJobResult},
+    query_pack::{QueryPack, WorkspaceScope},
     workspace::Workspace,
 };
-use crate::cli::args::OutputFormat;
 use std::path::Path;
 
 pub async fn execute(
@@ -46,16 +46,24 @@ pub async fn execute(
 
     if selected_workspaces.is_empty() {
         return Err(crate::error::KqlPanopticonError::QueryPackValidation(
-            "No workspaces selected for execution".into()
+            "No workspaces selected for execution".into(),
         ));
     }
 
     eprintln!(
         "Executing {} quer{} across {} workspace{}...",
         pack.get_queries().len(),
-        if pack.get_queries().len() == 1 { "y" } else { "ies" },
+        if pack.get_queries().len() == 1 {
+            "y"
+        } else {
+            "ies"
+        },
         selected_workspaces.len(),
-        if selected_workspaces.len() == 1 { "" } else { "s" }
+        if selected_workspaces.len() == 1 {
+            ""
+        } else {
+            "s"
+        }
     );
 
     // Get base settings from pack or use defaults
@@ -130,7 +138,7 @@ fn load_pack(path_str: &str) -> Result<QueryPack> {
     }
 
     Err(crate::error::KqlPanopticonError::QueryPackNotFound(
-        path_str.to_string()
+        path_str.to_string(),
     ))
 }
 
@@ -148,13 +156,11 @@ fn select_workspaces(
     if let Some(scope) = pack_scope {
         return match scope {
             WorkspaceScope::All => Ok(all_workspaces.to_vec()),
-            WorkspaceScope::Selected { ids } => {
-                Ok(all_workspaces
-                    .iter()
-                    .filter(|ws| ids.contains(&ws.workspace_id) || ids.contains(&ws.resource_id))
-                    .cloned()
-                    .collect())
-            }
+            WorkspaceScope::Selected { ids } => Ok(all_workspaces
+                .iter()
+                .filter(|ws| ids.contains(&ws.workspace_id) || ids.contains(&ws.resource_id))
+                .cloned()
+                .collect()),
             WorkspaceScope::Pattern { pattern } => {
                 filter_workspaces_by_pattern(all_workspaces, pattern)
             }
@@ -174,7 +180,10 @@ fn parse_workspace_spec(spec: &str, all_workspaces: &[Workspace]) -> Result<Vec<
     let ids: Vec<&str> = spec.split(',').map(|s| s.trim()).collect();
     Ok(all_workspaces
         .iter()
-        .filter(|ws| ids.iter().any(|id| ws.workspace_id.contains(id) || ws.name.contains(id)))
+        .filter(|ws| {
+            ids.iter()
+                .any(|id| ws.workspace_id.contains(id) || ws.name.contains(id))
+        })
         .cloned()
         .collect())
 }
@@ -182,10 +191,12 @@ fn parse_workspace_spec(spec: &str, all_workspaces: &[Workspace]) -> Result<Vec<
 fn filter_workspaces_by_pattern(workspaces: &[Workspace], pattern: &str) -> Result<Vec<Workspace>> {
     // Simple glob-style pattern matching
     let pattern = pattern.replace('*', ".*");
-    let regex = regex::Regex::new(&pattern)
-        .map_err(|e| crate::error::KqlPanopticonError::QueryPackValidation(
-            format!("Invalid workspace pattern: {}", e)
-        ))?;
+    let regex = regex::Regex::new(&pattern).map_err(|e| {
+        crate::error::KqlPanopticonError::QueryPackValidation(format!(
+            "Invalid workspace pattern: {}",
+            e
+        ))
+    })?;
 
     Ok(workspaces
         .iter()
@@ -196,7 +207,13 @@ fn filter_workspaces_by_pattern(workspaces: &[Workspace], pattern: &str) -> Resu
 
 fn sanitize_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .to_lowercase()
 }

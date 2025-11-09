@@ -1,6 +1,5 @@
 use crate::tui::model::{
-    jobs::JobState, query::QueryModel, session::SessionModel, settings::SettingsModel, Model,
-    Popup,
+    jobs::JobState, query::QueryModel, session::SessionModel, settings::SettingsModel, Model, Popup,
 };
 use ratatui::{
     layout::Rect,
@@ -204,7 +203,10 @@ fn render_job_details(f: &mut Frame, job: &JobState) {
         // Timestamp line
         lines.push(Line::from(vec![
             Span::styled("  Timestamp: ", label_style),
-            Span::styled(result.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(), value_style),
+            Span::styled(
+                result.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
+                value_style,
+            ),
         ]));
 
         match &result.result {
@@ -270,7 +272,10 @@ fn render_job_details(f: &mut Frame, job: &JobState) {
             if error.is_retryable() {
                 ("  Press 'r' to retry this job", Color::Yellow)
             } else {
-                ("  (Cannot retry: query syntax error - fix query first)", Color::DarkGray)
+                (
+                    "  (Cannot retry: query syntax error - fix query first)",
+                    Color::DarkGray,
+                )
             }
         } else {
             // No error details - allow retry (backwards compatibility)
@@ -289,14 +294,13 @@ fn render_job_details(f: &mut Frame, job: &JobState) {
         )));
     }
 
-    let paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Job Details")
-                .style(Style::default().bg(Color::Black)),
-        );
-        // Note: No .wrap() - we manually wrap text to maintain indentation
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Job Details")
+            .style(Style::default().bg(Color::Black)),
+    );
+    // Note: No .wrap() - we manually wrap text to maintain indentation
 
     f.render_widget(Clear, area);
     f.render_widget(paragraph, area);
@@ -312,7 +316,10 @@ fn wrap_text_with_indent(text: &str, indent: usize, max_width: usize) -> Vec<Str
     for line in text.lines() {
         // Check if we've hit the line limit
         if wrapped_lines.len() >= MAX_LINES {
-            wrapped_lines.push(format!("{}... (output truncated after {} lines)", indent_str, MAX_LINES));
+            wrapped_lines.push(format!(
+                "{}... (output truncated after {} lines)",
+                indent_str, MAX_LINES
+            ));
             break;
         }
 
@@ -331,7 +338,10 @@ fn wrap_text_with_indent(text: &str, indent: usize, max_width: usize) -> Vec<Str
         while !remaining.is_empty() {
             // Check line limit before adding each wrapped segment
             if wrapped_lines.len() >= MAX_LINES {
-                wrapped_lines.push(format!("{}... (output truncated after {} lines)", indent_str, MAX_LINES));
+                wrapped_lines.push(format!(
+                    "{}... (output truncated after {} lines)",
+                    indent_str, MAX_LINES
+                ));
                 return wrapped_lines;
             }
 
@@ -346,7 +356,11 @@ fn wrap_text_with_indent(text: &str, indent: usize, max_width: usize) -> Vec<Str
                 split_at = pos;
             }
 
-            wrapped_lines.push(format!("{}{}", indent_str, &remaining[..split_at].trim_end()));
+            wrapped_lines.push(format!(
+                "{}{}",
+                indent_str,
+                &remaining[..split_at].trim_end()
+            ));
             remaining = remaining[split_at..].trim_start();
         }
     }

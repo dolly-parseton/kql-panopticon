@@ -127,9 +127,10 @@ impl SessionModel {
     /// Refresh the sessions list from disk
     pub fn refresh_from_disk(&mut self, available_sessions: Vec<String>) {
         // Keep track of current selection
-        let selected_name = self.table_state.selected().and_then(|i| {
-            self.sessions.get(i).map(|s| s.name.clone())
-        });
+        let selected_name = self
+            .table_state
+            .selected()
+            .and_then(|i| self.sessions.get(i).map(|s| s.name.clone()));
 
         self.sessions.clear();
 
@@ -167,8 +168,18 @@ impl SessionModel {
         self.sessions.sort_by(|a, b| {
             match (&a.state, &b.state) {
                 // Current sessions always come first
-                (SessionState::CurrentSaved | SessionState::CurrentUnsaved | SessionState::CurrentNeverSaved, SessionState::Loadable) => std::cmp::Ordering::Less,
-                (SessionState::Loadable, SessionState::CurrentSaved | SessionState::CurrentUnsaved | SessionState::CurrentNeverSaved) => std::cmp::Ordering::Greater,
+                (
+                    SessionState::CurrentSaved
+                    | SessionState::CurrentUnsaved
+                    | SessionState::CurrentNeverSaved,
+                    SessionState::Loadable,
+                ) => std::cmp::Ordering::Less,
+                (
+                    SessionState::Loadable,
+                    SessionState::CurrentSaved
+                    | SessionState::CurrentUnsaved
+                    | SessionState::CurrentNeverSaved,
+                ) => std::cmp::Ordering::Greater,
                 // Otherwise sort by name
                 _ => a.name.cmp(&b.name),
             }
@@ -189,7 +200,8 @@ impl SessionModel {
     /// Refresh session states (call after changing current session or dirty flag)
     fn refresh_session_states(&mut self) {
         // First pass: collect new states
-        let new_states: Vec<(usize, SessionState)> = self.sessions
+        let new_states: Vec<(usize, SessionState)> = self
+            .sessions
             .iter()
             .enumerate()
             .map(|(idx, session)| {
@@ -207,26 +219,36 @@ impl SessionModel {
         }
 
         // Re-sort to ensure current session is at top
-        self.sessions.sort_by(|a, b| {
-            match (&a.state, &b.state) {
-                (SessionState::CurrentSaved | SessionState::CurrentUnsaved | SessionState::CurrentNeverSaved, SessionState::Loadable) => std::cmp::Ordering::Less,
-                (SessionState::Loadable, SessionState::CurrentSaved | SessionState::CurrentUnsaved | SessionState::CurrentNeverSaved) => std::cmp::Ordering::Greater,
-                _ => a.name.cmp(&b.name),
-            }
+        self.sessions.sort_by(|a, b| match (&a.state, &b.state) {
+            (
+                SessionState::CurrentSaved
+                | SessionState::CurrentUnsaved
+                | SessionState::CurrentNeverSaved,
+                SessionState::Loadable,
+            ) => std::cmp::Ordering::Less,
+            (
+                SessionState::Loadable,
+                SessionState::CurrentSaved
+                | SessionState::CurrentUnsaved
+                | SessionState::CurrentNeverSaved,
+            ) => std::cmp::Ordering::Greater,
+            _ => a.name.cmp(&b.name),
         });
     }
 
     /// Get the currently selected session
     pub fn get_selected_session(&self) -> Option<&SessionEntry> {
-        self.table_state.selected().and_then(|i| self.sessions.get(i))
+        self.table_state
+            .selected()
+            .and_then(|i| self.sessions.get(i))
     }
 
     /// Get the index of the current session
     #[allow(dead_code)]
     pub fn current_session_index(&self) -> Option<usize> {
-        self.current_session_name.as_ref().and_then(|name| {
-            self.sessions.iter().position(|s| s.name == *name)
-        })
+        self.current_session_name
+            .as_ref()
+            .and_then(|name| self.sessions.iter().position(|s| s.name == *name))
     }
 }
 

@@ -108,7 +108,7 @@ impl Client {
         Self::with_config(
             Duration::from_secs(300), // 5 minutes validation interval
             Duration::from_secs(30),  // 30 seconds query timeout
-            0,                         // 0 retries by default
+            0,                        // 0 retries by default
         )
     }
 
@@ -156,8 +156,9 @@ impl Client {
     pub async fn validate_auth(&self) -> Result<()> {
         // Check if we need to revalidate based on the interval
         let should_validate = {
-            let last_validated = self.last_validated.lock()
-                .map_err(|e| KqlPanopticonError::Other(format!("Auth validation lock poisoned: {}", e)))?;
+            let last_validated = self.last_validated.lock().map_err(|e| {
+                KqlPanopticonError::Other(format!("Auth validation lock poisoned: {}", e))
+            })?;
             match *last_validated {
                 None => true,
                 Some(last_time) => {
@@ -177,8 +178,9 @@ impl Client {
         match self.get_token_for_management().await {
             Ok(_) => {
                 // Update the last validated time
-                let mut last_validated = self.last_validated.lock()
-                    .map_err(|e| KqlPanopticonError::Other(format!("Auth validation lock poisoned: {}", e)))?;
+                let mut last_validated = self.last_validated.lock().map_err(|e| {
+                    KqlPanopticonError::Other(format!("Auth validation lock poisoned: {}", e))
+                })?;
                 *last_validated = Some(SystemTime::now());
                 Ok(())
             }
@@ -193,8 +195,9 @@ impl Client {
     pub async fn force_validate_auth(&self) -> Result<()> {
         match self.get_token_for_management().await {
             Ok(_) => {
-                let mut last_validated = self.last_validated.lock()
-                    .map_err(|e| KqlPanopticonError::Other(format!("Auth validation lock poisoned: {}", e)))?;
+                let mut last_validated = self.last_validated.lock().map_err(|e| {
+                    KqlPanopticonError::Other(format!("Auth validation lock poisoned: {}", e))
+                })?;
                 *last_validated = Some(SystemTime::now());
                 Ok(())
             }
@@ -227,17 +230,26 @@ impl Client {
         const TOKEN_REFRESH_BUFFER: Duration = Duration::from_secs(300); // 5 minutes before expiry
 
         {
-            let cached = self.log_analytics_token.lock()
-                .map_err(|e| KqlPanopticonError::Other(format!("Token cache lock poisoned: {}", e)))?;
+            let cached = self.log_analytics_token.lock().map_err(|e| {
+                KqlPanopticonError::Other(format!("Token cache lock poisoned: {}", e))
+            })?;
 
             if let Some(cached_token) = cached.as_ref() {
                 // Check if token is still valid (with buffer for refresh)
-                if let Ok(time_until_expiry) = cached_token.expires_at.duration_since(SystemTime::now()) {
+                if let Ok(time_until_expiry) =
+                    cached_token.expires_at.duration_since(SystemTime::now())
+                {
                     if time_until_expiry > TOKEN_REFRESH_BUFFER {
-                        log::debug!("Using cached Log Analytics token (expires in {:?})", time_until_expiry);
+                        log::debug!(
+                            "Using cached Log Analytics token (expires in {:?})",
+                            time_until_expiry
+                        );
                         return Ok(cached_token.token.clone());
                     } else {
-                        log::debug!("Cached token expiring soon (in {:?}), refreshing", time_until_expiry);
+                        log::debug!(
+                            "Cached token expiring soon (in {:?}), refreshing",
+                            time_until_expiry
+                        );
                     }
                 }
             }
@@ -258,12 +270,14 @@ impl Client {
 
         let token_string = token.token.secret().to_string();
         // Convert OffsetDateTime to SystemTime
-        let expires_at = SystemTime::UNIX_EPOCH + Duration::from_secs(token.expires_on.unix_timestamp() as u64);
+        let expires_at =
+            SystemTime::UNIX_EPOCH + Duration::from_secs(token.expires_on.unix_timestamp() as u64);
 
         // Cache the new token
         {
-            let mut cached = self.log_analytics_token.lock()
-                .map_err(|e| KqlPanopticonError::Other(format!("Token cache lock poisoned: {}", e)))?;
+            let mut cached = self.log_analytics_token.lock().map_err(|e| {
+                KqlPanopticonError::Other(format!("Token cache lock poisoned: {}", e))
+            })?;
             *cached = Some(CachedToken {
                 token: token_string.clone(),
                 expires_at,
@@ -446,7 +460,11 @@ impl Client {
             }
 
             let error_text = response.text().await.unwrap_or_default();
-            return Err(Self::parse_azure_error(status, &error_text, "Pagination failed"));
+            return Err(Self::parse_azure_error(
+                status,
+                &error_text,
+                "Pagination failed",
+            ));
         }
 
         let result: QueryResponse = response

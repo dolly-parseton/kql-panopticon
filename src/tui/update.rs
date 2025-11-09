@@ -385,9 +385,10 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                     query: query_text.clone(),
                     settings: settings.clone(),
                 };
-                let job_id = model
-                    .jobs
-                    .add_job_with_context(workspace.name.clone(), preview, retry_context);
+                let job_id =
+                    model
+                        .jobs
+                        .add_job_with_context(workspace.name.clone(), preview, retry_context);
                 job_ids.push(job_id);
             }
 
@@ -421,9 +422,9 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                     Ok(results) => {
                         for (idx, result) in results.into_iter().enumerate() {
                             if let Some(&job_id) = job_ids.get(idx) {
-                                let _ = update_tx.send(crate::tui::model::JobUpdateMessage::Completed(
-                                    job_id, result,
-                                ));
+                                let _ = update_tx.send(
+                                    crate::tui::model::JobUpdateMessage::Completed(job_id, result),
+                                );
                             }
                         }
                     }
@@ -443,7 +444,11 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
             }
 
             // Check if any jobs have retry context (loadable queries)
-            let has_loadable_jobs = model.jobs.jobs.iter().any(|job| job.retry_context.is_some());
+            let has_loadable_jobs = model
+                .jobs
+                .jobs
+                .iter()
+                .any(|job| job.retry_context.is_some());
             if !has_loadable_jobs {
                 return vec![Message::ShowError(
                     "No loadable jobs found (jobs must have queries to load)".to_string(),
@@ -480,9 +485,7 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
 
             // If no query found, this shouldn't happen since we checked above, but handle it
             if !found_query {
-                return vec![Message::ShowError(
-                    "No loadable queries found".to_string(),
-                )];
+                return vec![Message::ShowError("No loadable queries found".to_string())];
             }
 
             model.query.load_panel = Some(panel_state);
@@ -659,7 +662,7 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
             };
 
             // Create new job entry with retry context and capture its ID
-            let preview = retry_ctx.query.chars().take(200).collect();  // Use 200 chars like elsewhere
+            let preview = retry_ctx.query.chars().take(200).collect(); // Use 200 chars like elsewhere
             let new_job_id = model.jobs.add_job_with_context(
                 retry_ctx.workspace.name.clone(),
                 preview,
@@ -692,7 +695,7 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                     Ok(mut results) if !results.is_empty() => {
                         let result = results.remove(0);
                         let _ = update_tx.send(crate::tui::model::JobUpdateMessage::Completed(
-                            new_job_id,  // Use job ID, not index!
+                            new_job_id, // Use job ID, not index!
                             result,
                         ));
                     }
@@ -758,7 +761,9 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                 // Name from popup
                 model.popup = None;
                 if name.trim().is_empty() {
-                    return vec![Message::ShowError("Session name cannot be empty".to_string())];
+                    return vec![Message::ShowError(
+                        "Session name cannot be empty".to_string(),
+                    )];
                 }
                 name
             } else if let Some(name) = model.sessions.current_session_name.clone() {
@@ -777,13 +782,17 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
             model.process_job_updates();
 
             // Warn if there are running jobs that might complete after save
-            let running_count = model.jobs.jobs.iter()
+            let running_count = model
+                .jobs
+                .jobs
+                .iter()
                 .filter(|j| matches!(j.status, crate::tui::model::jobs::JobStatus::Running))
                 .count();
             if running_count > 0 {
                 log::warn!(
                     "Saving session '{}' with {} running jobs - state may be inconsistent",
-                    session_name, running_count
+                    session_name,
+                    running_count
                 );
             }
 
@@ -853,7 +862,9 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                     }
 
                     // Load pack origin (if any)
-                    model.sessions.set_pack_origin(session.created_from_pack.clone());
+                    model
+                        .sessions
+                        .set_pack_origin(session.created_from_pack.clone());
 
                     // Set as current session
                     model.sessions.set_current_session(Some(session_name));
@@ -881,7 +892,10 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
             // Delete from disk
             match crate::session::Session::delete(&session_name) {
                 Ok(()) => vec![Message::SessionsRefresh],
-                Err(e) => vec![Message::ShowError(format!("Failed to delete session: {}", e))],
+                Err(e) => vec![Message::ShowError(format!(
+                    "Failed to delete session: {}",
+                    e
+                ))],
             }
         }
 
@@ -895,13 +909,20 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
             // Load session from disk
             let session = match crate::session::Session::load(&session_name) {
                 Ok(s) => s,
-                Err(e) => return vec![Message::ShowError(format!("Failed to load session: {}", e))],
+                Err(e) => {
+                    return vec![Message::ShowError(format!("Failed to load session: {}", e))]
+                }
             };
 
             // Convert to query pack
             let pack = match session.to_query_pack() {
                 Ok(p) => p,
-                Err(e) => return vec![Message::ShowError(format!("Failed to convert to pack: {}", e))],
+                Err(e) => {
+                    return vec![Message::ShowError(format!(
+                        "Failed to convert to pack: {}",
+                        e
+                    ))]
+                }
             };
 
             // Generate output filename (remove timestamp suffix if present)
@@ -916,15 +937,26 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                 })
                 .unwrap_or(&session_name);
 
-            let output_path = match crate::query_pack::QueryPack::get_library_path(&format!("{}.yaml", pack_name)) {
+            let output_path = match crate::query_pack::QueryPack::get_library_path(&format!(
+                "{}.yaml",
+                pack_name
+            )) {
                 Ok(p) => p,
-                Err(e) => return vec![Message::ShowError(format!("Failed to get output path: {}", e))],
+                Err(e) => {
+                    return vec![Message::ShowError(format!(
+                        "Failed to get output path: {}",
+                        e
+                    ))]
+                }
             };
 
             // Ensure parent directory exists
             if let Some(parent) = output_path.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    return vec![Message::ShowError(format!("Failed to create directory: {}", e))];
+                    return vec![Message::ShowError(format!(
+                        "Failed to create directory: {}",
+                        e
+                    ))];
                 }
             }
 
@@ -995,7 +1027,9 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                         vec![Message::ShowError("Pack contains no queries".to_string())]
                     }
                 } else {
-                    vec![Message::ShowError("Failed to load pack details".to_string())]
+                    vec![Message::ShowError(
+                        "Failed to load pack details".to_string(),
+                    )]
                 }
             } else {
                 vec![Message::ShowError("No pack selected".to_string())]
@@ -1021,7 +1055,8 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
 
                     if selected_workspaces.is_empty() {
                         return vec![Message::ShowError(
-                            "No workspaces selected. Go to Workspaces tab and select some.".to_string()
+                            "No workspaces selected. Go to Workspaces tab and select some."
+                                .to_string(),
                         )];
                     }
 
@@ -1072,7 +1107,9 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                     }
 
                     // Track pack origin for session
-                    model.sessions.set_pack_origin(Some(entry.relative_path.clone()));
+                    model
+                        .sessions
+                        .set_pack_origin(Some(entry.relative_path.clone()));
 
                     // Mark session as dirty
                     model.sessions.mark_dirty();
@@ -1116,10 +1153,14 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                             match results {
                                 Ok(mut results) if !results.is_empty() => {
                                     let result = results.remove(0);
-                                    log::debug!("Job {} completed successfully, sending completion message", job_id);
-                                    let _ = tx.send(crate::tui::model::JobUpdateMessage::Completed(
-                                        job_id, result,
-                                    ));
+                                    log::debug!(
+                                        "Job {} completed successfully, sending completion message",
+                                        job_id
+                                    );
+                                    let _ =
+                                        tx.send(crate::tui::model::JobUpdateMessage::Completed(
+                                            job_id, result,
+                                        ));
                                 }
                                 Ok(_) => {
                                     // Empty results - shouldn't happen but handle it
@@ -1129,20 +1170,26 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                                         retry_ctx_for_errors,
                                         "Query execution returned no results".to_string(),
                                     );
-                                    let _ = tx.send(crate::tui::model::JobUpdateMessage::Completed(
-                                        job_id, failed_result,
-                                    ));
+                                    let _ =
+                                        tx.send(crate::tui::model::JobUpdateMessage::Completed(
+                                            job_id,
+                                            failed_result,
+                                        ));
                                 }
                                 Err(e) => {
                                     // Execution error - create failed result
-                                    log::error!("Job {} failed: {}, sending failed message", job_id, e);
-                                    let failed_result = create_failed_result(
-                                        retry_ctx_for_errors,
-                                        e.to_string(),
+                                    log::error!(
+                                        "Job {} failed: {}, sending failed message",
+                                        job_id,
+                                        e
                                     );
-                                    let _ = tx.send(crate::tui::model::JobUpdateMessage::Completed(
-                                        job_id, failed_result,
-                                    ));
+                                    let failed_result =
+                                        create_failed_result(retry_ctx_for_errors, e.to_string());
+                                    let _ =
+                                        tx.send(crate::tui::model::JobUpdateMessage::Completed(
+                                            job_id,
+                                            failed_result,
+                                        ));
                                 }
                             }
                             // Permit is automatically released when _permit is dropped
@@ -1165,7 +1212,9 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                         )),
                     ]
                 } else {
-                    vec![Message::ShowError("Failed to load pack details".to_string())]
+                    vec![Message::ShowError(
+                        "Failed to load pack details".to_string(),
+                    )]
                 }
             } else {
                 vec![Message::ShowError("No pack selected".to_string())]
@@ -1183,7 +1232,10 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                 let current_query_text = model.query.get_text();
 
                 // Find the pack entry that matches the loaded pack
-                let pack_entry = model.packs.packs.iter_mut()
+                let pack_entry = model
+                    .packs
+                    .packs
+                    .iter_mut()
                     .find(|entry| entry.relative_path == pack_path);
 
                 if let Some(entry) = pack_entry {
@@ -1241,7 +1293,7 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
                 }
             } else {
                 vec![Message::ShowError(
-                    "No pack loaded. Load a pack from the Packs tab first.".to_string()
+                    "No pack loaded. Load a pack from the Packs tab first.".to_string(),
                 )]
             }
         }

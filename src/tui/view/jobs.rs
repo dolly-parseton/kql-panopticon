@@ -9,13 +9,19 @@ use ratatui::{
 /// Render the Jobs tab
 pub fn render(f: &mut Frame, model: &mut JobsModel, area: Rect) {
     // Create header
-    let header = Row::new(vec!["Status", "Workspace", "Query", "Duration", "Timestamp"])
-        .style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-        .bottom_margin(1);
+    let header = Row::new(vec![
+        "Status",
+        "Workspace",
+        "Query",
+        "Duration",
+        "Timestamp",
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )
+    .bottom_margin(1);
 
     // Create rows
     // Pre-compute duration strings, status strings, and timestamp strings
@@ -78,8 +84,8 @@ pub fn render(f: &mut Frame, model: &mut JobsModel, area: Rect) {
         ratatui::layout::Constraint::Length(28), // Status - fits "FAILED (Query Error)" etc.
         ratatui::layout::Constraint::Percentage(20), // Workspace
         ratatui::layout::Constraint::Percentage(30), // Query
-        ratatui::layout::Constraint::Length(10),     // Duration
-        ratatui::layout::Constraint::Length(19),     // Timestamp - "YYYY-MM-DD HH:MM:SS"
+        ratatui::layout::Constraint::Length(10), // Duration
+        ratatui::layout::Constraint::Length(19), // Timestamp - "YYYY-MM-DD HH:MM:SS"
     ];
 
     let table = Table::new(rows, widths)

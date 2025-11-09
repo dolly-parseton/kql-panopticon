@@ -24,14 +24,16 @@ fn render_pack_list(f: &mut Frame, model: &mut Model, area: Rect) {
     let packs_model = &mut model.packs;
 
     // Get currently loaded pack path from query context
-    let loaded_pack_path = model.query.pack_context.as_ref().map(|ctx| ctx.pack_path.as_str());
+    let loaded_pack_path = model
+        .query
+        .pack_context
+        .as_ref()
+        .map(|ctx| ctx.pack_path.as_str());
 
     // Show loading or error state
     if packs_model.loading {
         let loading_paragraph = Paragraph::new("Loading query packs...")
-            .block(Block::default()
-                .borders(Borders::ALL)
-                .title("Query Packs"))
+            .block(Block::default().borders(Borders::ALL).title("Query Packs"))
             .style(Style::default().fg(Color::Yellow));
         f.render_widget(loading_paragraph, area);
         return;
@@ -39,9 +41,7 @@ fn render_pack_list(f: &mut Frame, model: &mut Model, area: Rect) {
 
     if let Some(error) = &packs_model.error {
         let error_paragraph = Paragraph::new(format!("Error: {}", error))
-            .block(Block::default()
-                .borders(Borders::ALL)
-                .title("Query Packs"))
+            .block(Block::default().borders(Borders::ALL).title("Query Packs"))
             .style(Style::default().fg(Color::Red));
         f.render_widget(error_paragraph, area);
         return;
@@ -55,19 +55,14 @@ fn render_pack_list(f: &mut Frame, model: &mut Model, area: Rect) {
             Line::from(""),
             Line::from(vec![
                 Span::raw("Create packs in: "),
-                Span::styled(
-                    "~/.kql-panopticon/packs/",
-                    Style::default().fg(Color::Cyan),
-                ),
+                Span::styled("~/.kql-panopticon/packs/", Style::default().fg(Color::Cyan)),
             ]),
             Line::from(""),
             Line::from("Press 'r' to refresh"),
         ];
 
         let empty_paragraph = Paragraph::new(empty_lines)
-            .block(Block::default()
-                .borders(Borders::ALL)
-                .title("Query Packs"))
+            .block(Block::default().borders(Borders::ALL).title("Query Packs"))
             .style(Style::default().fg(Color::Gray))
             .wrap(Wrap { trim: true });
         f.render_widget(empty_paragraph, area);
@@ -155,9 +150,11 @@ fn render_pack_details(f: &mut Frame, model: &PacksModel, area: Rect) {
             Line::from(""),
             Line::from("Use Up/Down to select a pack"),
         ])
-        .block(Block::default()
-            .borders(Borders::TOP | Borders::RIGHT | Borders::BOTTOM)
-            .title("Pack Details"))
+        .block(
+            Block::default()
+                .borders(Borders::TOP | Borders::RIGHT | Borders::BOTTOM)
+                .title("Pack Details"),
+        )
         .style(Style::default().fg(Color::Gray));
         f.render_widget(help_paragraph, area);
         return;
@@ -181,9 +178,11 @@ fn render_pack_details(f: &mut Frame, model: &PacksModel, area: Rect) {
                 Style::default().fg(Color::Gray),
             )),
         ])
-        .block(Block::default()
-            .borders(Borders::TOP | Borders::RIGHT | Borders::BOTTOM)
-            .title("Pack Details"))
+        .block(
+            Block::default()
+                .borders(Borders::TOP | Borders::RIGHT | Borders::BOTTOM)
+                .title("Pack Details"),
+        )
         .wrap(Wrap { trim: true });
         f.render_widget(error_paragraph, area);
         return;
@@ -192,9 +191,11 @@ fn render_pack_details(f: &mut Frame, model: &PacksModel, area: Rect) {
     // Show loading state if pack not loaded yet
     if entry.pack.is_none() {
         let loading_paragraph = Paragraph::new("Press Enter to load pack details...")
-            .block(Block::default()
-                .borders(Borders::TOP | Borders::RIGHT | Borders::BOTTOM)
-                .title("Pack Details"))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP | Borders::RIGHT | Borders::BOTTOM)
+                    .title("Pack Details"),
+            )
             .style(Style::default().fg(Color::Yellow));
         f.render_widget(loading_paragraph, area);
         return;
@@ -251,10 +252,7 @@ fn render_pack_details(f: &mut Frame, model: &PacksModel, area: Rect) {
     // List queries
     for (i, query) in queries.iter().enumerate() {
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {}. ", i + 1),
-                Style::default().fg(Color::Yellow),
-            ),
+            Span::styled(format!("  {}. ", i + 1), Style::default().fg(Color::Yellow)),
             Span::raw(&query.name),
         ]));
 
@@ -280,9 +278,11 @@ fn render_pack_details(f: &mut Frame, model: &PacksModel, area: Rect) {
     lines.push(Line::from("  r - Refresh pack list"));
 
     let details_paragraph = Paragraph::new(lines)
-        .block(Block::default()
-            .borders(Borders::TOP | Borders::RIGHT | Borders::BOTTOM)
-            .title("Pack Details"))
+        .block(
+            Block::default()
+                .borders(Borders::TOP | Borders::RIGHT | Borders::BOTTOM)
+                .title("Pack Details"),
+        )
         .wrap(Wrap { trim: true });
 
     f.render_widget(details_paragraph, area);

@@ -65,8 +65,8 @@ impl PackContext {
 /// Sort order for load panel
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadPanelSort {
-    Status,       // Sort by job status
-    Alphabetical, // Sort by job name
+    Status,        // Sort by job status
+    Alphabetical,  // Sort by job name
     Chronological, // Sort by creation time (order in list)
 }
 

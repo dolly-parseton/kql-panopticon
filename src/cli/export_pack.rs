@@ -1,8 +1,4 @@
-use crate::{
-    error::Result,
-    query_pack::QueryPack,
-    session::Session,
-};
+use crate::{error::Result, query_pack::QueryPack, session::Session};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy)]
@@ -11,11 +7,7 @@ pub enum PackFormat {
     Json,
 }
 
-pub fn execute(
-    session_name: String,
-    output: Option<PathBuf>,
-    format: PackFormat,
-) -> Result<()> {
+pub fn execute(session_name: String, output: Option<PathBuf>, format: PackFormat) -> Result<()> {
     // Load session
     eprintln!("Loading session '{}'...", session_name);
     let session = Session::load(&session_name)?;
@@ -37,7 +29,8 @@ pub fn execute(
             PackFormat::Json => "json",
         };
 
-        let pack_name = session.name
+        let pack_name = session
+            .name
             .rsplit_once('_')
             .and_then(|(prefix, suffix)| {
                 if suffix.chars().all(|c| c.is_ascii_digit()) && suffix.len() >= 6 {

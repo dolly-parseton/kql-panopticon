@@ -1,4 +1,7 @@
-use crate::tui::model::{jobs::JobsModel, query::{EditorMode, QueryModel}};
+use crate::tui::model::{
+    jobs::JobsModel,
+    query::{EditorMode, QueryModel},
+};
 use crate::tui::view::syntax_textarea::SyntaxTextArea;
 use ratatui::{
     layout::Rect,
@@ -95,10 +98,7 @@ fn render_load_panel(
             let job_name = format!("Job #{}", original_idx + 1);
 
             let line = Line::from(vec![
-                Span::styled(
-                    status_indicator,
-                    Style::default().fg(job.status.color()),
-                ),
+                Span::styled(status_indicator, Style::default().fg(job.status.color())),
                 Span::raw(" "),
                 Span::raw(job_name),
                 Span::raw(" - "),
@@ -120,11 +120,7 @@ fn render_load_panel(
         if panel_state.inverted { "↓" } else { "↑" }
     );
 
-    let title = format!(
-        "Load Query ({}) | {}",
-        sorted_indices.len(),
-        sort_text
-    );
+    let title = format!("Load Query ({}) | {}", sorted_indices.len(), sort_text);
 
     let list = List::new(items).block(
         Block::default()

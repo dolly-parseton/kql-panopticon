@@ -97,10 +97,7 @@ impl From<&JobState> for SerializableJob {
         let error_details = job.error.clone();
 
         // Extract timestamp from result if available
-        let timestamp = job
-            .result
-            .as_ref()
-            .map(|r| r.timestamp.to_rfc3339());
+        let timestamp = job.result.as_ref().map(|r| r.timestamp.to_rfc3339());
 
         Self {
             status: job.status.as_str().to_string(),
@@ -120,11 +117,7 @@ impl From<&JobState> for SerializableJob {
 impl Session {
     /// Create a new session from current state
     #[allow(dead_code)]
-    pub fn new(
-        name: String,
-        settings: &SettingsModel,
-        jobs: &[JobState],
-    ) -> Self {
+    pub fn new(name: String, settings: &SettingsModel, jobs: &[JobState]) -> Self {
         Self::new_with_pack(name, settings, jobs, None)
     }
 
@@ -365,7 +358,11 @@ impl Session {
 
                     (
                         Some(QueryJobResult {
-                            workspace_id: job.workspace.as_ref().map(|w| w.workspace_id.clone()).unwrap_or_default(),
+                            workspace_id: job
+                                .workspace
+                                .as_ref()
+                                .map(|w| w.workspace_id.clone())
+                                .unwrap_or_default(),
                             workspace_name: job.workspace_name.clone(),
                             query: job.query.clone().unwrap_or_default(),
                             result: Err(kql_error),
@@ -378,11 +375,15 @@ impl Session {
                     // Completed jobs - create success result placeholder
                     (
                         Some(QueryJobResult {
-                            workspace_id: job.workspace.as_ref().map(|w| w.workspace_id.clone()).unwrap_or_default(),
+                            workspace_id: job
+                                .workspace
+                                .as_ref()
+                                .map(|w| w.workspace_id.clone())
+                                .unwrap_or_default(),
                             workspace_name: job.workspace_name.clone(),
                             query: job.query.clone().unwrap_or_default(),
                             result: Ok(crate::query_job::JobSuccess {
-                                row_count: 0, // We don't save row count, but it's not critical
+                                row_count: 0,  // We don't save row count, but it's not critical
                                 page_count: 1, // Default to 1 page
                                 output_path: PathBuf::from(""),
                                 file_size: 0,
@@ -417,10 +418,9 @@ impl Session {
 
 /// Get the sessions directory path (~/.kql-panopticon/sessions)
 pub fn get_sessions_dir() -> Result<PathBuf, KqlPanopticonError> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| KqlPanopticonError::InvalidConfiguration(
-            "Could not find home directory".to_string(),
-        ))?;
+    let home = dirs::home_dir().ok_or_else(|| {
+        KqlPanopticonError::InvalidConfiguration("Could not find home directory".to_string())
+    })?;
 
     Ok(home.join(".kql-panopticon").join("sessions"))
 }

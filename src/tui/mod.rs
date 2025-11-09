@@ -312,12 +312,13 @@ fn handle_popup_key(key: KeyCode, popup: &model::Popup, model: &Model) -> Messag
                         use crate::tui::model::jobs::JobStatus;
 
                         // Check basic retry eligibility
-                        let can_retry = matches!(job.status, JobStatus::Failed | JobStatus::Completed)
-                            && job.retry_context.is_some();
+                        let can_retry =
+                            matches!(job.status, JobStatus::Failed | JobStatus::Completed)
+                                && job.retry_context.is_some();
 
                         if !can_retry {
                             return Message::ShowError(
-                                "Job cannot be retried (missing context)".to_string()
+                                "Job cannot be retried (missing context)".to_string(),
                             );
                         }
 
@@ -325,7 +326,8 @@ fn handle_popup_key(key: KeyCode, popup: &model::Popup, model: &Model) -> Messag
                         if let Some(error) = &job.error {
                             if !error.is_retryable() {
                                 return Message::ShowError(
-                                    "Cannot retry: query syntax error - fix query first".to_string()
+                                    "Cannot retry: query syntax error - fix query first"
+                                        .to_string(),
                                 );
                             }
                         }
