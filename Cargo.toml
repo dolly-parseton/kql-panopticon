@@ -1,6 +1,6 @@
 [package]
 name = "kql-panopticon"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["dolly-parseton"]
 description = "Terminal UI for executing KQL queries across multiple Azure Log Analytics workspaces concurrently with CSV/JSON export"
@@ -45,3 +45,10 @@ tui-textarea = { version = "0.6", default-features = false, features = [
 log = "0.4"
 env_logger = "0.11"
 dirs = "5.0"
+
+[profile.release]
+opt-level = "z"     # Optimize for size
+lto = true          # Enable link-time optimization
+codegen-units = 1   # Maximize optimizations
+strip = true        # Strip symbols from binary
+panic = "abort"     # Abort on panic (smaller binary)

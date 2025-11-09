@@ -46,6 +46,7 @@ impl PackContext {
     }
 
     /// Get the current query
+    #[allow(dead_code)]
     pub fn current_query(&self) -> Option<&PackQuery> {
         self.queries.get(self.current_index)
     }

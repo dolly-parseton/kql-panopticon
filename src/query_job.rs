@@ -3,18 +3,18 @@ use crate::error::{KqlPanopticonError, Result};
 use crate::workspace::Workspace;
 use chrono::{DateTime, Local};
 use log::{debug, info, warn};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 /// Generate a unique temp file path to avoid collisions during concurrent executions
-fn generate_unique_temp_path(base_path: &PathBuf, extension: &str) -> PathBuf {
+fn generate_unique_temp_path(base_path: &Path, extension: &str) -> PathBuf {
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
     let pid = std::process::id();
 
     // Create unique temp filename: base.tmp.{timestamp}_{pid}.{extension}
-    let mut temp_path = base_path.clone();
+    let mut temp_path = base_path.to_path_buf();
     let temp_filename = format!("{}.tmp.{}_{}.{}",
         base_path.file_stem().unwrap_or_default().to_string_lossy(),
         timestamp,
@@ -199,7 +199,7 @@ impl StreamingCsvWriter {
     }
 
     /// Finalize the file and move to final location
-    async fn finalize(mut self, final_path: &PathBuf) -> Result<usize> {
+    async fn finalize(mut self, final_path: &Path) -> Result<usize> {
         // Flush any remaining buffered data
         self.flush().await?;
 
@@ -225,7 +225,7 @@ impl StreamingCsvWriter {
     }
 
     /// Save partial results when pagination fails
-    async fn save_partial(mut self, output_path: &PathBuf) -> Result<(usize, PathBuf)> {
+    async fn save_partial(mut self, output_path: &Path) -> Result<(usize, PathBuf)> {
         // Flush any remaining buffered data
         self.flush().await?;
 
@@ -339,7 +339,7 @@ impl StreamingJsonWriter {
     /// Finalize the file and move to final location with metadata
     async fn finalize(
         mut self,
-        final_path: &PathBuf,
+        final_path: &Path,
         workspace: &Workspace,
         timestamp: &str,
         query: &str,
@@ -404,7 +404,7 @@ impl StreamingJsonWriter {
     /// Save partial results when pagination fails
     async fn save_partial(
         mut self,
-        output_path: &PathBuf,
+        output_path: &Path,
         workspace: &Workspace,
         timestamp: &str,
         query: &str,
@@ -694,7 +694,7 @@ impl QueryJob {
     }
 
     /// Write query response to CSV file with streaming and pagination
-    async fn write_csv_streaming(&self, client: &Client, output_path: &PathBuf) -> Result<(usize, usize)> {
+    async fn write_csv_streaming(&self, client: &Client, output_path: &Path) -> Result<(usize, usize)> {
         // Create unique temp file path to avoid collisions during concurrent executions
         let temp_path = generate_unique_temp_path(output_path, "csv");
 
@@ -770,7 +770,7 @@ impl QueryJob {
     }
 
     /// Write query response to JSON file with streaming and pagination
-    async fn write_json_streaming(&self, client: &Client, output_path: &PathBuf) -> Result<(usize, usize)> {
+    async fn write_json_streaming(&self, client: &Client, output_path: &Path) -> Result<(usize, usize)> {
         // Create unique temp file path to avoid collisions during concurrent executions
         let temp_path = generate_unique_temp_path(output_path, "json");
 
