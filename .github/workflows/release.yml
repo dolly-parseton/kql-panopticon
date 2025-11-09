@@ -5,35 +5,15 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  create-release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      version: ${{ steps.get_version.outputs.version }}
-    steps:
-      - name: Get version from tag
-        id: get_version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
-          draft: false
-          prerelease: false
-
   build:
     name: Build ${{ matrix.target }}
-    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -98,48 +78,42 @@ jobs:
             strip target/${{ matrix.target }}/release/kql-panopticon
           fi
 
+      - name: Get version from tag
+        id: get_version
+        shell: bash
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
       - name: Create archive (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf kql-panopticon-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz kql-panopticon
-          mv kql-panopticon-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz ../../..
+          tar czf kql-panopticon-${{ steps.get_version.outputs.version }}-${{ matrix.target }}.tar.gz kql-panopticon
+          mv kql-panopticon-${{ steps.get_version.outputs.version }}-${{ matrix.target }}.tar.gz ../../..
 
       - name: Create archive (Windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
           cd target/${{ matrix.target }}/release
-          Compress-Archive -Path kql-panopticon.exe -DestinationPath ../../../kql-panopticon-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.zip
+          Compress-Archive -Path kql-panopticon.exe -DestinationPath ../../../kql-panopticon-${{ steps.get_version.outputs.version }}-${{ matrix.target }}.zip
 
       - name: Generate checksum (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
-          shasum -a 256 kql-panopticon-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz > kql-panopticon-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
+          shasum -a 256 kql-panopticon-${{ steps.get_version.outputs.version }}-${{ matrix.target }}.tar.gz > kql-panopticon-${{ steps.get_version.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
 
       - name: Generate checksum (Windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $hash = (Get-FileHash -Algorithm SHA256 kql-panopticon-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.zip).Hash.ToLower()
-          "$hash  kql-panopticon-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.zip" | Out-File -Encoding ASCII kql-panopticon-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.zip.sha256
+          $hash = (Get-FileHash -Algorithm SHA256 kql-panopticon-${{ steps.get_version.outputs.version }}-${{ matrix.target }}.zip).Hash.ToLower()
+          "$hash  kql-panopticon-${{ steps.get_version.outputs.version }}-${{ matrix.target }}.zip" | Out-File -Encoding ASCII kql-panopticon-${{ steps.get_version.outputs.version }}-${{ matrix.target }}.zip.sha256
 
-      - name: Upload release archive
-        uses: actions/upload-release-asset@v1
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            kql-panopticon-${{ steps.get_version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}
+            kql-panopticon-${{ steps.get_version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./kql-panopticon-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}
-          asset_name: kql-panopticon-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}
-          asset_content_type: application/octet-stream
-
-      - name: Upload checksum
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./kql-panopticon-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}.sha256
-          asset_name: kql-panopticon-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}.sha256
-          asset_content_type: text/plain
