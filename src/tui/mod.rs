@@ -221,10 +221,11 @@ fn handle_key_event(key: KeyCode, modifiers: KeyModifiers, model: &Model) -> Mes
                 }
             }
             KeyCode::Char('1') => return Message::SwitchTab(Tab::Query),
-            KeyCode::Char('2') => return Message::SwitchTab(Tab::Workspaces),
-            KeyCode::Char('3') => return Message::SwitchTab(Tab::Settings),
-            KeyCode::Char('4') => return Message::SwitchTab(Tab::Jobs),
-            KeyCode::Char('5') => return Message::SwitchTab(Tab::Sessions),
+            KeyCode::Char('2') => return Message::SwitchTab(Tab::Packs),
+            KeyCode::Char('3') => return Message::SwitchTab(Tab::Workspaces),
+            KeyCode::Char('4') => return Message::SwitchTab(Tab::Settings),
+            KeyCode::Char('5') => return Message::SwitchTab(Tab::Jobs),
+            KeyCode::Char('6') => return Message::SwitchTab(Tab::Sessions),
             _ => {}
         }
     }
