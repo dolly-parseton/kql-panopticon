@@ -1,5 +1,13 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
+/// Parse a key=value pair for --set arguments
+fn parse_key_value(s: &str) -> Result<(String, String), String> {
+    let pos = s
+        .find('=')
+        .ok_or_else(|| format!("invalid KEY=VALUE: no '=' found in '{}'", s))?;
+    Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
+}
+
 #[derive(Parser)]
 #[command(name = "kql-panopticon")]
 #[command(
@@ -51,6 +59,34 @@ pub enum Commands {
         /// Output format
         #[arg(short = 'f', long, value_enum, default_value = "yaml")]
         format: PackFormat,
+    },
+
+    /// Run an investigation pack (chained queries with variable extraction)
+    RunInvestigation {
+        /// Path to investigation pack file (.yaml, .yml, or .json)
+        /// Can be absolute path or relative to ~/.kql-panopticon/investigations/
+        pack: String,
+
+        /// Override workspace selection (comma-separated IDs, names, or 'all')
+        #[arg(short, long)]
+        workspaces: Option<String>,
+
+        /// Set input variable values (can be repeated)
+        /// Format: --set name=value
+        #[arg(long = "set", value_parser = parse_key_value)]
+        inputs: Vec<(String, String)>,
+
+        /// Output folder override
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+
+        /// Validate pack without executing
+        #[arg(long)]
+        validate_only: bool,
+
+        /// Print results to stdout as JSON summary
+        #[arg(long)]
+        json: bool,
     },
 }
 

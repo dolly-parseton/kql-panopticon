@@ -56,6 +56,9 @@ pub async fn run_tui(client: Client) -> Result<()> {
         // Load query packs from disk (no async needed)
         let _ = tx.send(message::Message::PacksRefresh);
 
+        // Load investigation packs from disk (no async needed)
+        let _ = tx.send(message::Message::InvestigationsRefresh);
+
         // Authenticate and load workspaces
         match init_client.force_validate_auth().await {
             Ok(_) => {
@@ -209,8 +212,9 @@ fn handle_key_event(key: KeyCode, modifiers: KeyModifiers, model: &Model) -> Mes
     let in_query_edit_mode = model.current_tab == Tab::Query
         && (model.query.mode == EditorMode::Insert || model.query.mode == EditorMode::Visual);
 
-    // Handle global keys (only work outside query edit mode)
-    if !in_query_edit_mode {
+    // Handle global keys (only work outside query edit mode and input collection)
+    let in_investigation_input = model.investigations.is_collecting_inputs();
+    if !in_query_edit_mode && !in_investigation_input {
         match key {
             KeyCode::Char('q') => return Message::Quit,
             KeyCode::Char('r') => {
@@ -218,14 +222,17 @@ fn handle_key_event(key: KeyCode, modifiers: KeyModifiers, model: &Model) -> Mes
                     return Message::WorkspacesRefresh;
                 } else if model.current_tab == Tab::Sessions {
                     return Message::SessionsRefresh;
+                } else if model.current_tab == Tab::Investigations {
+                    return Message::InvestigationsRefresh;
                 }
             }
             KeyCode::Char('1') => return Message::SwitchTab(Tab::Query),
             KeyCode::Char('2') => return Message::SwitchTab(Tab::Packs),
-            KeyCode::Char('3') => return Message::SwitchTab(Tab::Workspaces),
-            KeyCode::Char('4') => return Message::SwitchTab(Tab::Settings),
-            KeyCode::Char('5') => return Message::SwitchTab(Tab::Jobs),
-            KeyCode::Char('6') => return Message::SwitchTab(Tab::Sessions),
+            KeyCode::Char('3') => return Message::SwitchTab(Tab::Investigations),
+            KeyCode::Char('4') => return Message::SwitchTab(Tab::Workspaces),
+            KeyCode::Char('5') => return Message::SwitchTab(Tab::Settings),
+            KeyCode::Char('6') => return Message::SwitchTab(Tab::Jobs),
+            KeyCode::Char('7') => return Message::SwitchTab(Tab::Sessions),
             _ => {}
         }
     }
@@ -256,6 +263,7 @@ fn handle_key_event(key: KeyCode, modifiers: KeyModifiers, model: &Model) -> Mes
         Tab::Jobs => handle_jobs_key(key),
         Tab::Sessions => handle_sessions_key(key, modifiers),
         Tab::Packs => handle_packs_key(key),
+        Tab::Investigations => handle_investigations_key(key, modifiers, model),
     }
 }
 
@@ -491,5 +499,31 @@ fn handle_packs_key(key: KeyCode) -> Message {
         KeyCode::Char('e') => Message::PacksExecute,
         KeyCode::Char('s') => Message::PacksSave,
         _ => Message::NoOp,
+    }
+}
+
+/// Handle key events for the Investigations tab
+fn handle_investigations_key(key: KeyCode, _modifiers: KeyModifiers, model: &Model) -> Message {
+    // If collecting inputs, handle input-specific keys
+    if model.investigations.is_collecting_inputs() {
+        match key {
+            KeyCode::Esc => Message::InvestigationsInputCancel,
+            KeyCode::Enter => Message::InvestigationsInputConfirm,
+            KeyCode::Tab | KeyCode::Down => Message::InvestigationsInputNext,
+            KeyCode::BackTab | KeyCode::Up => Message::InvestigationsInputPrev,
+            KeyCode::Backspace => Message::InvestigationsInputBackspace,
+            KeyCode::Char(c) => Message::InvestigationsInputChar(c),
+            _ => Message::NoOp,
+        }
+    } else {
+        // Normal investigation browsing
+        match key {
+            KeyCode::Up => Message::InvestigationsPrevious,
+            KeyCode::Down => Message::InvestigationsNext,
+            KeyCode::Char('r') => Message::InvestigationsRefresh,
+            KeyCode::Enter => Message::InvestigationsLoadDetails,
+            KeyCode::Char('e') => Message::InvestigationsStartExecution,
+            _ => Message::NoOp,
+        }
     }
 }

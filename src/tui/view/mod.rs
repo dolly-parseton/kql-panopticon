@@ -1,4 +1,5 @@
 pub mod controls;
+pub mod investigations;
 pub mod jobs;
 pub mod kql_highlight;
 pub mod packs;
@@ -48,6 +49,7 @@ pub fn ui(f: &mut Frame, model: &mut Model) {
         Tab::Jobs => jobs::render(f, &mut model.jobs, chunks[1]),
         Tab::Sessions => session::render(f, model, chunks[1]),
         Tab::Packs => packs::render(f, model, chunks[1]),
+        Tab::Investigations => investigations::render(f, model, chunks[1]),
     }
 
     // Render controls bar

@@ -1,6 +1,8 @@
 mod cli;
 mod client;
 mod error;
+mod investigation_job;
+mod investigation_pack;
 mod query_job;
 mod query_pack;
 mod session;
@@ -45,6 +47,18 @@ async fn main() -> Result<()> {
                 PackFormat::Json => cli::export_pack::PackFormat::Json,
             };
             cli::export_pack::execute(session, output, pack_format)?;
+        }
+        Some(Commands::RunInvestigation {
+            pack,
+            workspaces,
+            inputs,
+            output,
+            validate_only,
+            json,
+        }) => {
+            initialize_logger_to_stderr();
+            cli::run_investigation::execute(pack, workspaces, inputs, output, validate_only, json)
+                .await?;
         }
     }
 

@@ -41,6 +41,21 @@ pub enum KqlPanopticonError {
     #[error("Query pack not found: {0}")]
     QueryPackNotFound(String),
 
+    #[error("Investigation pack validation failed: {0}")]
+    InvestigationPackValidation(String),
+
+    #[error("Investigation pack not found: {0}")]
+    InvestigationPackNotFound(String),
+
+    #[error("Investigation execution failed: {0}")]
+    InvestigationExecutionFailed(String),
+
+    #[error("Circular dependency detected: {0}")]
+    CircularDependency(String),
+
+    #[error("Invalid variable reference: {0}")]
+    InvalidVariableReference(String),
+
     #[error("Home directory not found")]
     HomeDirectoryNotFound,
 

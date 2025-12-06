@@ -1,3 +1,4 @@
+pub mod investigations;
 pub mod jobs;
 pub mod packs;
 pub mod query;
@@ -8,6 +9,7 @@ pub mod workspaces;
 use crate::client::Client;
 use crate::query_job::QueryJobResult;
 use crate::tui::message::Tab;
+use investigations::InvestigationsModel;
 use jobs::JobsModel;
 use packs::PacksModel;
 use query::QueryModel;
@@ -32,6 +34,8 @@ pub struct Model {
     pub sessions: SessionModel,
     /// Query packs state
     pub packs: PacksModel,
+    /// Investigation packs state
+    pub investigations: InvestigationsModel,
     /// Azure client
     pub client: Client,
     /// Current popup message (if any)
@@ -93,6 +97,7 @@ impl Model {
             jobs: JobsModel::new(),
             sessions: SessionModel::new(),
             packs: PacksModel::new(),
+            investigations: InvestigationsModel::new(),
             client,
             popup: None,
             job_update_rx,

@@ -39,6 +39,14 @@ A terminal-based tool for executing Kusto Query Language (KQL) queries across mu
 - **Session export**: Convert refined queries back to reusable packs
 - **Pack origin tracking**: Sessions remember which pack created them
 
+### Investigation Packs
+- **Chained query execution**: Results from earlier steps feed into subsequent queries
+- **Variable extraction**: Extract values from results and substitute into downstream queries
+- **Per-workspace isolation**: Extracted values never merge across workspaces
+- **Input variables**: User-provided parameters for flexible investigations
+- **Automatic chunking**: Large arrays split across multiple queries automatically
+- **Dependency resolution**: Steps execute in topological order based on dependencies
+
 ### Terminal UI
 - **Vim-style query editor**: Normal, Insert, and Visual modes for efficient text editing
 - **Query loading**: Load and reuse queries from previous jobs
@@ -121,6 +129,17 @@ kql-panopticon run-pack security/failed-auth.yaml --validate-only
 
 # Export session as reusable pack
 kql-panopticon export-pack my-session-name
+```
+
+### CLI Mode (Investigation Packs)
+
+Execute chained queries with variable extraction:
+```bash
+# Run investigation with input variables
+kql-panopticon run-investigation threat-hunt.yaml --set target_ip=10.0.0.1
+
+# Validate investigation pack
+kql-panopticon run-investigation threat-hunt.yaml --validate-only
 ```
 
 Logs are written to `kql-panopticon.log` in the current directory.
@@ -228,9 +247,53 @@ kql-panopticon export-pack my-session-name --format json
 6. Export improved version: Press `p` in Sessions tab
 7. Version control and share the refined pack
 
+For complete schema reference and examples, see [Query Packs Documentation](docs/query-packs.md).
+
+## Investigation Packs
+
+Investigation packs enable chained query execution where results from earlier steps feed into subsequent queries—essential for threat hunting workflows requiring pivots between entities.
+
+### Quick Example
+
+```yaml
+kind: investigation
+name: "Phishing Investigation"
+inputs:
+  - name: malicious_url
+    description: "URL to investigate"
+steps:
+  - name: url_clicks
+    query: |
+      UrlClickEvents
+      | where Url contains "{{inputs.malicious_url}}"
+      | distinct UserPrincipalName
+    extract:
+      affected_users:
+        column: UserPrincipalName
+        type: array
+
+  - name: user_activity
+    depends_on: [url_clicks]
+    query: |
+      SigninLogs
+      | where UserPrincipalName in ({{url_clicks.affected_users}})
+```
+
+### Running Investigation Packs
+
+```bash
+# Execute with input variables
+kql-panopticon run-investigation phishing.yaml --set malicious_url=evil.com
+
+# Validate without executing
+kql-panopticon run-investigation phishing.yaml --validate-only
+```
+
+For complete schema reference, variable syntax, and examples, see [Investigation Packs Documentation](docs/investigation-packs.md).
+
 ## Interface Overview
 
-The interface consists of six tabs accessible via number keys (1-6) or Tab/Shift+Tab:
+The interface consists of seven tabs accessible via number keys (1-7) or Tab/Shift+Tab:
 
 ### 1. Settings Tab
 
@@ -414,6 +477,18 @@ Each pack shows:
 
 Packs are loaded from the config directory's `packs/` subdirectory (supports subdirectories).
 
+### 7. Investigations Tab
+
+Browse and execute investigation packs for chained query workflows.
+
+**Navigation:**
+- `Up/Down`: Navigate investigation list
+- `Enter`: View investigation details
+- `e`: Execute selected investigation on selected workspaces
+- `r`: Refresh investigation list from disk
+
+Investigation packs enable multi-step queries where results from earlier steps feed into subsequent queries. See [Investigation Packs Documentation](docs/investigation-packs.md) for full schema and examples.
+
 ## Output Format
 
 CSV/JSON files are organized hierarchically:
@@ -444,12 +519,13 @@ When executing query packs with multiple queries, each query gets its own file w
 
 These shortcuts work from any tab (except when in Insert mode in the Query tab):
 
-- `1`: Switch to Settings tab
-- `2`: Switch to Workspaces tab
-- `3`: Switch to Query tab
-- `4`: Switch to Jobs tab
-- `5`: Switch to Sessions tab
-- `6`: Switch to Packs tab
+- `1`: Switch to Query tab
+- `2`: Switch to Packs tab
+- `3`: Switch to Investigations tab
+- `4`: Switch to Workspaces tab
+- `5`: Switch to Settings tab
+- `6`: Switch to Jobs tab
+- `7`: Switch to Sessions tab
 - `Tab`: Next tab
 - `Shift+Tab`: Previous tab
 - `q`: Quit application
@@ -486,6 +562,26 @@ Options:
   -f, --format <FORMAT>    Output format [default: yaml] [possible values: yaml, json]
   -h, --help               Print help
 ```
+
+### Run Investigation Pack
+
+```bash
+kql-panopticon run-investigation <pack> [OPTIONS]
+
+Arguments:
+  <pack>  Path to investigation pack file (.yaml, .yml, or .json)
+          Can be absolute path or relative to ~/.kql-panopticon/investigations/
+
+Options:
+  -s, --set <KEY=VALUE>        Set input variable (can be used multiple times)
+  -w, --workspaces <LIST>      Workspace selection (comma-separated IDs or 'all')
+  -o, --output <PATH>          Override output base directory
+      --validate-only          Validate pack without executing
+      --json                   Print results to stdout as JSON
+  -h, --help                   Print help
+```
+
+See [Investigation Packs Documentation](docs/investigation-packs.md) for full schema, examples, and usage guide.
 
 ## Authentication
 
@@ -591,6 +687,11 @@ Configuration and data stored in home directory (on macOS/Linux: `~/.kql-panopti
 │   │   └── ransomware.yaml
 │   └── compliance/
 │       └── audit-logs.yaml
+├── investigations/           # Investigation pack library
+│   ├── threat-hunting/
+│   │   └── phishing-investigation.yaml
+│   └── incident-response/
+│       └── lateral-movement.yaml
 └── sessions/                 # Saved sessions
     ├── investigation-2025-01-15.json
     └── baseline-queries.json
