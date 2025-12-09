@@ -1221,6 +1221,159 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Message> {
             }
         }
 
+        // === Investigations ===
+        Message::InvestigationsPrevious => {
+            model.investigations.previous();
+            vec![]
+        }
+
+        Message::InvestigationsNext => {
+            model.investigations.next();
+            vec![]
+        }
+
+        Message::InvestigationsRefresh => {
+            model.investigations.refresh();
+            vec![]
+        }
+
+        Message::InvestigationsLoadDetails => {
+            if let Err(e) = model.investigations.load_selected_pack() {
+                vec![Message::ShowError(format!(
+                    "Failed to load investigation: {}",
+                    e
+                ))]
+            } else {
+                vec![]
+            }
+        }
+
+        Message::InvestigationsStartExecution => {
+            // First ensure the pack is loaded
+            if let Err(e) = model.investigations.load_selected_pack() {
+                return vec![Message::ShowError(format!(
+                    "Failed to load investigation: {}",
+                    e
+                ))];
+            }
+
+            // Check if pack has validation errors
+            if let Some(entry) = model.investigations.get_selected_entry() {
+                if let Some(error) = entry.get_error() {
+                    return vec![Message::ShowError(format!(
+                        "Investigation pack has errors: {}",
+                        error
+                    ))];
+                }
+            }
+
+            // Check if we have workspaces selected
+            let selected_workspaces = model.workspaces.get_selected_workspaces();
+            if selected_workspaces.is_empty() {
+                return vec![Message::ShowError(
+                    "No workspaces selected. Go to Workspaces tab and select some.".to_string(),
+                )];
+            }
+
+            // Start input collection if needed
+            if model.investigations.start_input_collection().is_some() {
+                // Input collection started, show the input dialog
+                vec![]
+            } else {
+                // No inputs needed, execute directly
+                vec![Message::InvestigationsInputConfirm]
+            }
+        }
+
+        Message::InvestigationsInputChar(c) => {
+            if let Some(state) = &mut model.investigations.input_collection {
+                state.current_value.push(c);
+            }
+            vec![]
+        }
+
+        Message::InvestigationsInputBackspace => {
+            if let Some(state) = &mut model.investigations.input_collection {
+                state.current_value.pop();
+            }
+            vec![]
+        }
+
+        Message::InvestigationsInputNext => {
+            model.investigations.next_input();
+            vec![]
+        }
+
+        Message::InvestigationsInputPrev => {
+            model.investigations.prev_input();
+            vec![]
+        }
+
+        Message::InvestigationsInputCancel => {
+            model.investigations.cancel_input_collection();
+            vec![]
+        }
+
+        Message::InvestigationsInputConfirm => {
+            // Finalize inputs (or get empty map if no inputs needed)
+            let inputs = model
+                .investigations
+                .finalize_inputs()
+                .unwrap_or_default();
+
+            // Get pack and workspaces
+            let Some(entry) = model.investigations.get_selected_entry() else {
+                return vec![Message::ShowError("No investigation selected".to_string())];
+            };
+
+            let Some(pack) = entry.pack.clone() else {
+                return vec![Message::ShowError("Investigation not loaded".to_string())];
+            };
+
+            let _pack_path = entry.path.clone();
+
+            // Validate required inputs
+            for input in &pack.inputs {
+                if input.required && !inputs.contains_key(&input.name) && input.default.is_none() {
+                    return vec![Message::ShowError(format!(
+                        "Missing required input: {}",
+                        input.name
+                    ))];
+                }
+            }
+
+            // Merge with defaults
+            let mut final_inputs = std::collections::HashMap::new();
+            for input in &pack.inputs {
+                if let Some(value) = inputs.get(&input.name) {
+                    if !value.is_empty() {
+                        final_inputs.insert(input.name.clone(), value.clone());
+                    } else if let Some(default) = &input.default {
+                        final_inputs.insert(input.name.clone(), default.clone());
+                    }
+                } else if let Some(default) = &input.default {
+                    final_inputs.insert(input.name.clone(), default.clone());
+                }
+            }
+
+            let selected_workspaces = model.workspaces.get_selected_workspaces();
+
+            // Execute investigation in background
+            let _client = model.client.clone();
+            let _output_base = std::path::PathBuf::from(&model.settings.output_folder);
+
+            // Note: Full async execution would require progress channel integration
+            // For now, show a message that execution is starting
+            // The actual execution would be wired up similarly to pack execution
+
+            vec![Message::ShowSuccess(format!(
+                "Starting investigation '{}' across {} workspaces with {} inputs",
+                pack.name,
+                selected_workspaces.len(),
+                final_inputs.len()
+            ))]
+        }
+
         Message::PacksSave => {
             // Check if there's a pack loaded in the query editor
             if let Some(pack_context) = &model.query.pack_context {

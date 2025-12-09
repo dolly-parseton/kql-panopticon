@@ -19,6 +19,7 @@ pub fn render(
     let tabs = [
         Tab::Query,
         Tab::Packs,
+        Tab::Investigations,
         Tab::Workspaces,
         Tab::Settings,
         Tab::Jobs,

@@ -11,6 +11,18 @@ pub enum KqlPanopticonError {
     #[error("HTTP request failed: {0}")]
     HttpRequestFailed(String),
 
+    #[error("HTTP rate limited, retry after {retry_after} seconds")]
+    HttpRateLimited { retry_after: u64 },
+
+    #[error("HTTP step error: {0}")]
+    HttpStepError(String),
+
+    #[error("Secret resolution failed: {0}")]
+    SecretResolutionFailed(String),
+
+    #[error("JSONPath extraction failed: {0}")]
+    JsonPathError(String),
+
     #[error("Failed to parse response: {0}")]
     ParseFailed(String),
 
@@ -40,6 +52,21 @@ pub enum KqlPanopticonError {
 
     #[error("Query pack not found: {0}")]
     QueryPackNotFound(String),
+
+    #[error("Investigation pack validation failed: {0}")]
+    InvestigationPackValidation(String),
+
+    #[error("Investigation pack not found: {0}")]
+    InvestigationPackNotFound(String),
+
+    #[error("Investigation execution failed: {0}")]
+    InvestigationExecutionFailed(String),
+
+    #[error("Circular dependency detected: {0}")]
+    CircularDependency(String),
+
+    #[error("Invalid variable reference: {0}")]
+    InvalidVariableReference(String),
 
     #[error("Home directory not found")]
     HomeDirectoryNotFound,

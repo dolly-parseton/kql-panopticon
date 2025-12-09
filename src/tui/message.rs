@@ -156,6 +156,30 @@ pub enum Message {
     /// Save current query changes back to the loaded pack
     PacksSave,
 
+    // === Investigations ===
+    /// Navigate investigations list up
+    InvestigationsPrevious,
+    /// Navigate investigations list down
+    InvestigationsNext,
+    /// Refresh investigations list from disk
+    InvestigationsRefresh,
+    /// Load selected investigation pack details
+    InvestigationsLoadDetails,
+    /// Start investigation execution (begins input collection if needed)
+    InvestigationsStartExecution,
+    /// Input character for current input field
+    InvestigationsInputChar(char),
+    /// Backspace for current input field
+    InvestigationsInputBackspace,
+    /// Move to next input field
+    InvestigationsInputNext,
+    /// Move to previous input field
+    InvestigationsInputPrev,
+    /// Confirm inputs and execute investigation
+    InvestigationsInputConfirm,
+    /// Cancel input collection
+    InvestigationsInputCancel,
+
     // === Popups ===
     /// Show an error popup (red)
     ShowError(String),
@@ -180,6 +204,7 @@ pub enum Message {
 pub enum Tab {
     Query,
     Packs,
+    Investigations,
     Workspaces,
     Settings,
     Jobs,
@@ -190,7 +215,8 @@ impl Tab {
     pub fn next(self) -> Self {
         match self {
             Tab::Query => Tab::Packs,
-            Tab::Packs => Tab::Workspaces,
+            Tab::Packs => Tab::Investigations,
+            Tab::Investigations => Tab::Workspaces,
             Tab::Workspaces => Tab::Settings,
             Tab::Settings => Tab::Jobs,
             Tab::Jobs => Tab::Sessions,
@@ -202,7 +228,8 @@ impl Tab {
         match self {
             Tab::Query => Tab::Sessions,
             Tab::Packs => Tab::Query,
-            Tab::Workspaces => Tab::Packs,
+            Tab::Investigations => Tab::Packs,
+            Tab::Workspaces => Tab::Investigations,
             Tab::Settings => Tab::Workspaces,
             Tab::Jobs => Tab::Settings,
             Tab::Sessions => Tab::Jobs,
@@ -213,10 +240,11 @@ impl Tab {
         match self {
             Tab::Query => "Query (1)",
             Tab::Packs => "Packs (2)",
-            Tab::Workspaces => "Workspaces (3)",
-            Tab::Settings => "Settings (4)",
-            Tab::Jobs => "Jobs (5)",
-            Tab::Sessions => "Sessions (6)",
+            Tab::Investigations => "Investigate (3)",
+            Tab::Workspaces => "Workspaces (4)",
+            Tab::Settings => "Settings (5)",
+            Tab::Jobs => "Jobs (6)",
+            Tab::Sessions => "Sessions (7)",
         }
     }
 }
