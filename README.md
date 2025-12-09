@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
 
-A terminal-based tool for executing Kusto Query Language (KQL) queries across multiple Azure Log Analytics workspaces concurrently. Features an interactive TUI, reusable query packs, session management, and organized CSV/JSON exports.
+KQL tooling for Azure Log Analytics - concurrent multi-workspace queries, chained investigations, HTTP enrichment, and automated reports.
 
 ## Screenshots
 
@@ -40,12 +40,12 @@ A terminal-based tool for executing Kusto Query Language (KQL) queries across mu
 - **Pack origin tracking**: Sessions remember which pack created them
 
 ### Investigation Packs
-- **Chained query execution**: Results from earlier steps feed into subsequent queries
-- **Variable extraction**: Extract values from results and substitute into downstream queries
+- **Chained queries**: Results from earlier steps feed into subsequent queries automatically
+- **HTTP enrichment**: Call external APIs (threat intel, WHOIS, etc.) with rate limiting and error handling
+- **Variable substitution**: Reference results via `{{step.*.Column}}` syntax - no manual extraction needed
+- **Report generation**: Tera templates with verdict rules and weighted scoring
 - **Per-workspace isolation**: Extracted values never merge across workspaces
 - **Input variables**: User-provided parameters for flexible investigations
-- **Automatic chunking**: Large arrays split across multiple queries automatically
-- **Dependency resolution**: Steps execute in topological order based on dependencies
 
 ### Terminal UI
 - **Vim-style query editor**: Normal, Insert, and Visual modes for efficient text editing
@@ -251,7 +251,7 @@ For complete schema reference and examples, see [Query Packs Documentation](docs
 
 ## Investigation Packs
 
-Investigation packs enable chained query execution where results from earlier steps feed into subsequent queries—essential for threat hunting workflows requiring pivots between entities.
+Investigation packs chain queries together - results from step 1 feed into step 2, and so on. They also support HTTP steps for external API enrichment and report generation with verdict rules.
 
 ### Quick Example
 
@@ -261,22 +261,49 @@ name: "Phishing Investigation"
 inputs:
   - name: malicious_url
     description: "URL to investigate"
+
 steps:
   - name: url_clicks
     query: |
       UrlClickEvents
       | where Url contains "{{inputs.malicious_url}}"
-      | distinct UserPrincipalName
-    extract:
-      affected_users:
-        column: UserPrincipalName
-        type: array
+      | project UserPrincipalName, Url, TimeGenerated
 
   - name: user_activity
     depends_on: [url_clicks]
     query: |
       SigninLogs
-      | where UserPrincipalName in ({{url_clicks.affected_users}})
+      | where UserPrincipalName in ({{url_clicks.*.UserPrincipalName}})
+```
+
+No explicit `extract` block needed - just reference columns directly via `{{step.*.Column}}`.
+
+### HTTP Enrichment
+
+Call external APIs mid-investigation:
+
+```yaml
+- name: domain_whois
+  type: http
+  depends_on: [suspicious_domains]
+  foreach: "suspicious_domains as domain"
+
+  request:
+    method: POST
+    url: "https://api.example.com/whois"
+    auth: azure  # or use secrets
+    body:
+      domain: "{{domain.SenderDomain}}"
+
+  response:
+    fields:
+      created: "$.created"
+      registrar: "$.registrar.name"
+
+  rate_limit:
+    requests: 5
+    per: second
+  on_error: continue
 ```
 
 ### Running Investigation Packs
@@ -289,7 +316,7 @@ kql-panopticon run-investigation phishing.yaml --set malicious_url=evil.com
 kql-panopticon run-investigation phishing.yaml --validate-only
 ```
 
-For complete schema reference, variable syntax, and examples, see [Investigation Packs Documentation](docs/investigation-packs.md).
+For complete schema reference, condition syntax, scoring engine, and examples, see [Investigation Packs Documentation](docs/investigation-packs.md).
 
 ## Interface Overview
 

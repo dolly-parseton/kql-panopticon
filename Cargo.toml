@@ -1,14 +1,14 @@
 [package]
 name = "kql-panopticon"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 authors = ["dolly-parseton"]
-description = "Terminal UI for executing KQL queries across multiple Azure Log Analytics workspaces concurrently with CSV/JSON export"
+description = "KQL tooling for Azure Log Analytics - concurrent multi-workspace queries, chained investigations, HTTP enrichment, and automated reports"
 license = "MIT"
 repository = "https://github.com/dolly-parseton/kql-panopticon"
 homepage = "https://github.com/dolly-parseton/kql-panopticon"
 readme = "README.md"
-keywords = ["azure", "kql", "log-analytics", "tui", "kusto"]
+keywords = ["azure", "kql", "log-analytics", "sentinel", "threat-hunting"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = [
     "output/",

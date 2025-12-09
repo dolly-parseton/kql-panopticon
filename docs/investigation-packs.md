@@ -172,18 +172,68 @@ steps:
 
 Variables use double-brace syntax: `{{namespace.variable}}`
 
-### Namespaces
+### Accessing Step Results (Recommended)
 
-| Namespace | Syntax | Description |
-|-----------|--------|-------------|
-| `inputs` | `{{inputs.variable_name}}` | User-provided input value |
-| Step name | `{{step_name.variable_name}}` | Extracted value from a previous step |
+The preferred way to access step results is through direct column access:
+
+| Syntax | Description | Example Output |
+|--------|-------------|----------------|
+| `{{step.*.Column}}` | Array of all values from Column | `'val1','val2','val3'` |
+| `{{step.first.Column}}` | First row's value only | `'val1'` |
+| `{{step[0].Column}}` | Indexed row access (0-based) | `'val1'` |
+| `{{step[N].Column}}` | Nth row's value | `'valN'` |
+
+**Example:**
+```yaml
+steps:
+  - name: find_users
+    query: |
+      SigninLogs | distinct UserPrincipalName
+
+  - name: user_activity
+    depends_on: [find_users]
+    query: |
+      AuditLogs
+      | where InitiatedBy.user.userPrincipalName in ({{find_users.*.UserPrincipalName}})
+```
+
+### Foreach Alias Access
+
+When using `foreach` iteration, access the current row via the alias:
+
+```yaml
+steps:
+  - name: enrich_ips
+    foreach: "suspicious_ips as ip"
+    query: |
+      ThreatIntel
+      | where IPAddress == "{{ip.RemoteIP}}"
+```
+
+### Legacy Extract Syntax
+
+For backward compatibility, you can still define explicit extractions:
+
+```yaml
+extract:
+  users:
+    column: UserPrincipalName
+    type: array
+```
+
+Then reference as `{{step_name.users}}`. However, direct column access (`{{step.*.Column}}`) is preferred for new investigations.
+
+### Input Variables
+
+| Syntax | Description |
+|--------|-------------|
+| `{{inputs.variable_name}}` | User-provided input value |
 
 ### Rules
 
 1. **Namespace required**: Bare variables like `{{value}}` are invalid
-2. **Dependency declaration**: To reference `{{step_a.users}}`, you must include `step_a` in `depends_on`
-3. **Extraction must exist**: Referenced variables must be defined in the source step's `extract` block
+2. **Dependency declaration**: To reference `{{step_a.*.Column}}`, you must include `step_a` in `depends_on`
+3. **Automatic quoting**: Array values are automatically quoted based on `quote_style` (default: single quotes)
 
 ---
 
@@ -819,6 +869,225 @@ kql-panopticon run-investigation investigation.yaml
 1. **Validate first**: Always run with `--validate-only` before execution
 2. **Check manifests**: Review `manifest.json` for failure details
 3. **Independent workspaces**: Failures in one workspace don't affect others
+
+---
+
+## Condition Syntax Reference
+
+Conditions are used in `when` clauses, verdict rules, and scoring indicators. They evaluate to `true` or `false` based on step results.
+
+### Basic Syntax
+
+| Pattern | Description | Example |
+|---------|-------------|---------|
+| `true` / `false` | Literal boolean | `"true"` |
+| `not <condition>` | Negation | `"not email_details.length == 0"` |
+| `<cond1> and <cond2>` | Both must be true | `"step_a.length > 0 and step_b.length > 0"` |
+| `<cond1> or <cond2>` | Either must be true | `"high_risk.length > 0 or medium_risk.length > 0"` |
+
+### Length Checks
+
+Check the number of rows in a step's results:
+
+| Pattern | Description |
+|---------|-------------|
+| `step.length == N` | Exactly N rows |
+| `step.length > N` | More than N rows |
+| `step.length < N` | Fewer than N rows |
+| `step.length >= N` | At least N rows |
+| `step.length <= N` | At most N rows |
+
+**Example:**
+```yaml
+when: "suspicious_ips.length > 0"
+```
+
+### Field Comparisons
+
+Compare field values in results:
+
+| Pattern | Description |
+|---------|-------------|
+| `step.field == value` | First row's field equals value |
+| `step.field != value` | First row's field not equal |
+| `step.field > N` | First row's field greater than N |
+| `step[N].field == value` | Nth row's field equals value |
+
+**Examples:**
+```yaml
+# Check first row's boolean field
+when: "email_details.AuthPassed == true"
+
+# Check specific row
+condition: "results[0].ThreatScore > 80"
+```
+
+### Predicates (any/all)
+
+Check conditions across all rows:
+
+| Pattern | Description |
+|---------|-------------|
+| `step.any(field == value)` | True if ANY row matches |
+| `step.any(field > N)` | True if ANY row's field > N |
+| `step.all(field == value)` | True if ALL rows match |
+| `step.all(field > N)` | True if ALL rows' field > N |
+
+**Examples:**
+```yaml
+# True if any IP has high threat score
+condition: "ip_enrichment.any(threat_score > 80)"
+
+# True if all URLs are safe
+condition: "url_analysis.all(IsSafe == true)"
+
+# Combined check
+condition: "sender_rep.any(QuarantineRate > 30) and click_activity.any(ClickedThrough == true)"
+```
+
+### Supported Operators
+
+| Operator | Description |
+|----------|-------------|
+| `==` | Equal to |
+| `!=` | Not equal to |
+| `>` | Greater than |
+| `<` | Less than |
+| `>=` | Greater than or equal |
+| `<=` | Less than or equal |
+
+### Type Handling
+
+- **Booleans**: Use `true` or `false` (unquoted)
+- **Numbers**: Use numeric literals (e.g., `50`, `3.14`)
+- **Strings**: Quotes optional for simple values, comparison is case-sensitive
+
+**Examples:**
+```yaml
+# Boolean comparison
+condition: "email.AuthPassed == true"
+
+# Numeric comparison
+condition: "stats.FailedCount > 100"
+
+# String comparison (quotes optional)
+condition: "email.SenderDomain == microsoft.com"
+```
+
+---
+
+## Report Generation
+
+Investigation packs can generate reports from results using the Tera template engine.
+
+### Report Configuration
+
+```yaml
+report:
+  format: markdown          # markdown, html, or json
+  output: "report-{{timestamp}}.md"
+  template: |
+    # Investigation Report
+    ...
+  verdict_rules:
+    - name: rule_name
+      condition: "step.any(field > value)"
+      level: "HIGH"
+      summary: "Description of finding"
+      recommendation: "Action to take"
+```
+
+### Template Context
+
+Templates have access to:
+
+| Variable | Description |
+|----------|-------------|
+| `meta` | Execution metadata (investigation_name, timestamp, status, etc.) |
+| `inputs` | User-provided input variables |
+| `verdict` | Matched verdict rule (level, summary, recommendation) |
+| `scoring` | Scoring results if configured (total_score, level, matched_indicators) |
+| `workspaces` | List of workspace info objects |
+| `{step_name}` | Array of result rows from each step |
+
+### Custom Tera Filters
+
+Two custom filters are available for report templates:
+
+#### `default_nan`
+
+Replace NaN, null, or empty values with a default:
+
+```jinja2
+{{ value | default_nan(value="N/A") }}
+{{ score | default_nan(value="0") }}
+```
+
+Handles:
+- `null` values
+- NaN/Infinity numbers
+- Empty strings
+- Strings containing "nan", "null", "undefined"
+
+#### `unique`
+
+Deduplicate an array of objects by a field:
+
+```jinja2
+{% for email in investigation_context | unique(field="NetworkMessageId") %}
+  {{ email.Subject }}
+{% endfor %}
+```
+
+### Verdict Rules
+
+Verdict rules are evaluated in order; the first matching rule determines the verdict:
+
+```yaml
+verdict_rules:
+  - name: critical_threat
+    condition: "threats.any(Severity == Critical)"
+    level: "CRITICAL"
+    summary: "Critical threat detected"
+    recommendation: "Immediate action required"
+
+  - name: default
+    condition: "true"
+    level: "LOW"
+    summary: "No significant threats"
+    recommendation: "Continue monitoring"
+```
+
+### Scoring Engine
+
+The scoring engine calculates a weighted score based on matched indicators:
+
+```yaml
+scoring:
+  indicators:
+    - name: malicious_ip
+      condition: "enrichment.any(IsMalicious == true)"
+      weight: 50
+      description: "Known malicious IP detected"
+
+    - name: legitimate_sender
+      condition: "sender_rep.any(InboxRate > 90)"
+      weight: -20    # Negative weights reduce score
+      description: "Established legitimate sender"
+
+  thresholds:
+    - level: "CRITICAL"
+      min_score: 50
+      summary: "Score {{score}} indicates critical risk"
+      recommendation: "Take immediate action"
+
+    - level: "LOW"
+      min_score: -100
+      summary: "Score {{score}} indicates low risk"
+      recommendation: "No action needed"
+```
+
+Thresholds are evaluated in order; use descending `min_score` values.
 
 ---
 
