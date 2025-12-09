@@ -1,7 +1,7 @@
 mod cli;
 mod client;
 mod error;
-mod investigation_job;
+mod investigation;
 mod investigation_pack;
 mod query_job;
 mod query_pack;

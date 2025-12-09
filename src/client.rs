@@ -209,7 +209,7 @@ impl Client {
     }
 
     /// Get a token for Azure Management API
-    async fn get_token_for_management(&self) -> Result<String> {
+    pub async fn get_token_for_management(&self) -> Result<String> {
         let token = self
             .credential
             .get_token(&["https://management.azure.com/.default"])

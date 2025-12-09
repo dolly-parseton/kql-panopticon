@@ -1,7 +1,7 @@
 use crate::{
     client::Client,
     error::{KqlPanopticonError, Result},
-    investigation_job::{InvestigationRunner, ProgressUpdate, Status},
+    investigation::{InvestigationResult, InvestigationRunner, ProgressUpdate, Status},
     investigation_pack::InvestigationPack,
     workspace::Workspace,
 };
@@ -80,7 +80,7 @@ pub async fn execute(
         selected_workspaces,
         input_map,
         output_base,
-    )
+    )?
     .with_pack_path(resolved_path);
 
     // Spawn progress printer if not JSON output
@@ -313,7 +313,7 @@ fn print_progress(update: &ProgressUpdate) {
     }
 }
 
-fn print_summary(result: &crate::investigation_job::InvestigationResult) {
+fn print_summary(result: &InvestigationResult) {
     eprintln!("\n--- Investigation Summary ---");
     eprintln!("Name: {}", result.investigation_name);
     eprintln!(

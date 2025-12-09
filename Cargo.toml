@@ -45,6 +45,8 @@ tui-textarea = { version = "0.6", default-features = false, features = [
 log = "0.4"
 env_logger = "0.11"
 dirs = "5.0"
+tera = "1.19"
+jsonpath_lib = "0.3"  # JSONPath extraction for HTTP step responses
 
 [profile.release]
 opt-level = "z"     # Optimize for size

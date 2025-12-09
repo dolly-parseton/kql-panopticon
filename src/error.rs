@@ -11,6 +11,18 @@ pub enum KqlPanopticonError {
     #[error("HTTP request failed: {0}")]
     HttpRequestFailed(String),
 
+    #[error("HTTP rate limited, retry after {retry_after} seconds")]
+    HttpRateLimited { retry_after: u64 },
+
+    #[error("HTTP step error: {0}")]
+    HttpStepError(String),
+
+    #[error("Secret resolution failed: {0}")]
+    SecretResolutionFailed(String),
+
+    #[error("JSONPath extraction failed: {0}")]
+    JsonPathError(String),
+
     #[error("Failed to parse response: {0}")]
     ParseFailed(String),
 

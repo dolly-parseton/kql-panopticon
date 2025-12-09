@@ -1,0 +1,173 @@
+# Example Investigation Pack with HTTP Steps
+# This demonstrates the HTTP step feature for enriching KQL query results
+# with external API data (in this case, IP reputation/geolocation)
+#
+# NOTE: This is an example - replace the API endpoints and keys with real ones
+# for your threat intelligence provider.
+
+kind: investigation
+name: IP Enrichment Investigation
+description: |
+  Investigates suspicious IP addresses found in Azure logs by:
+  1. Querying Azure Sentinel for failed sign-ins
+  2. Enriching each source IP with threat intelligence data
+  3. Generating a report with risk scores
+
+version: "1.0"
+
+# Secrets are resolved from environment variables
+secrets:
+  threat_intel_api_key: "${THREAT_INTEL_API_KEY}"
+
+# User inputs
+inputs:
+  - name: timespan
+    description: Time range for the KQL query
+    type: string
+    required: false
+    default: "P7D"
+  - name: threshold
+    description: Minimum failed sign-in count to investigate
+    type: string
+    required: false
+    default: "10"
+
+# Output folder template
+output:
+  folder: "./investigations/{{name}}/{{timestamp}}"
+
+steps:
+  # Step 1: KQL query to find suspicious IPs
+  - name: suspicious_ips
+    query: |
+      SigninLogs
+      | where TimeGenerated > ago({{inputs.timespan}})
+      | where ResultType != "0"
+      | summarize FailedAttempts = count() by IPAddress
+      | where FailedAttempts >= {{inputs.threshold}}
+      | project IPAddress, FailedAttempts
+      | order by FailedAttempts desc
+      | take 20
+
+  # Step 2: HTTP enrichment for each IP (using foreach)
+  # This calls an external threat intelligence API for each IP
+  - name: ip_enrichment
+    type: http
+    depends_on:
+      - suspicious_ips
+    foreach: "suspicious_ips as ip"
+
+    request:
+      method: GET
+      url: "https://api.threatintel.example.com/v1/ip/{{ip.IPAddress}}"
+      headers:
+        Authorization: "Bearer {{secrets.threat_intel_api_key}}"
+        Accept: "application/json"
+
+    response:
+      fields:
+        ip_address: "$.ip"
+        country: "$.location.country"
+        city: "$.location.city"
+        is_malicious: "$.threat.is_malicious"
+        threat_score: "$.threat.score"
+        threat_categories: "$.threat.categories[*]"
+        last_seen: "$.last_seen"
+
+    # Rate limiting: max 10 requests per second
+    rate_limit:
+      requests: 10
+      per: second
+
+    # Continue even if some IP lookups fail
+    on_error: continue
+
+    # Default aggregation: append all results
+    aggregate: append
+
+  # Step 3: Alternative - batch lookup (if API supports it)
+  # This demonstrates how to use array syntax for bulk API calls
+  - name: bulk_ip_check
+    type: http
+    depends_on:
+      - suspicious_ips
+    when: "length(suspicious_ips) > 0"
+
+    request:
+      method: POST
+      url: "https://api.threatintel.example.com/v1/ip/batch"
+      headers:
+        Authorization: "Bearer {{secrets.threat_intel_api_key}}"
+        Content-Type: "application/json"
+      body:
+        ips: "{{suspicious_ips.*.IPAddress}}"
+
+    response:
+      fields:
+        ip_address: "$.results[*].ip"
+        risk_level: "$.results[*].risk_level"
+        country: "$.results[*].country"
+
+    on_error: fail
+
+# Report configuration
+report:
+  format: markdown
+  template: |
+    # IP Enrichment Investigation Report
+
+    **Generated:** {{timestamp}}
+    **Time Range:** {{inputs.timespan}}
+
+    ## Summary
+
+    Found {{suspicious_ips | length}} suspicious IP addresses with {{inputs.threshold}}+ failed sign-in attempts.
+
+    ## Enriched Results
+
+    | IP Address | Country | Threat Score | Malicious |
+    |------------|---------|--------------|-----------|
+    {% for row in ip_enrichment %}
+    | {{row.ip_address}} | {{row.country}} | {{row.threat_score}} | {{row.is_malicious}} |
+    {% endfor %}
+
+    ## Risk Assessment
+
+    {% set high_risk = ip_enrichment | selectattr("threat_score", ">", "70") | list %}
+    **High Risk IPs (score > 70):** {{high_risk | length}}
+
+    {% if high_risk | length > 0 %}
+    ### High Risk Details
+    {% for ip in high_risk %}
+    - **{{ip.ip_address}}** ({{ip.country}}): Score {{ip.threat_score}}
+    {% endfor %}
+    {% endif %}
+
+# Scoring configuration for verdict
+scoring:
+  rules:
+    - name: high_threat_ips
+      condition: "any(ip_enrichment, threat_score > 80)"
+      score: 30
+      verdict: suspicious
+      description: "High threat score IPs detected"
+
+    - name: many_failed_attempts
+      condition: "any(suspicious_ips, FailedAttempts > 100)"
+      score: 20
+      verdict: suspicious
+      description: "IP with over 100 failed attempts"
+
+    - name: malicious_ips
+      condition: "any(ip_enrichment, is_malicious == true)"
+      score: 40
+      verdict: malicious
+      description: "Known malicious IP addresses"
+
+  thresholds:
+    - verdict: benign
+      max_score: 20
+    - verdict: suspicious
+      max_score: 50
+    - verdict: malicious
+      max_score: 100

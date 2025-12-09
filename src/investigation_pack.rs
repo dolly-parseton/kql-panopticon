@@ -3,6 +3,111 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+/// Step type discriminator
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StepType {
+    /// KQL query step (default)
+    #[default]
+    Kql,
+    /// HTTP request step for external APIs
+    Http,
+}
+
+/// HTTP method for HTTP steps
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HttpMethod {
+    Get,
+    Post,
+    Put,
+    Delete,
+}
+
+/// Authentication method for HTTP steps
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMethod {
+    /// Use existing Azure CLI credential for Azure Management API calls
+    Azure,
+    /// No authentication (or authentication defined in headers)
+    None,
+}
+
+/// HTTP request configuration for HTTP steps
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpRequest {
+    /// HTTP method (GET, POST, PUT, DELETE)
+    pub method: HttpMethod,
+
+    /// URL template (supports variable substitution like {{inputs.name}}, {{step.*.Column}})
+    pub url: String,
+
+    /// Query string parameters (supports variable substitution)
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub params: HashMap<String, String>,
+
+    /// HTTP headers (supports variable substitution, including {{secrets.name}})
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+
+    /// Request body for POST/PUT (supports variable substitution)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<serde_json::Value>,
+
+    /// Authentication method
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthMethod>,
+}
+
+/// HTTP response extraction configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpResponse {
+    /// JSONPath to field name mapping for extracting data from response
+    /// Key is the output field name, value is the JSONPath expression
+    pub fields: HashMap<String, String>,
+}
+
+/// Rate limiting configuration for HTTP steps
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitConfig {
+    /// Number of requests allowed in the time period
+    pub requests: u32,
+
+    /// Time period for rate limiting
+    pub per: RateLimitPeriod,
+}
+
+/// Time period for rate limiting
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum RateLimitPeriod {
+    Second,
+    Minute,
+    Hour,
+}
+
+/// Error handling behavior for HTTP steps
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OnError {
+    /// Record error in _error column, continue with next row
+    #[default]
+    Continue,
+    /// Skip failed row entirely (don't include in results)
+    Skip,
+    /// Fail the entire step on first error
+    Fail,
+}
+
+/// Secrets configuration (top-level in investigation pack)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SecretsConfig {
+    /// Map of secret name to value template (e.g., ${ENV_VAR_NAME})
+    #[serde(flatten)]
+    pub secrets: HashMap<String, String>,
+}
+
 /// An investigation pack containing chained queries with variable extraction
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvestigationPack {
@@ -24,12 +129,24 @@ pub struct InvestigationPack {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<OutputConfig>,
 
+    /// Secrets configuration for HTTP steps (API keys, tokens from environment variables)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<SecretsConfig>,
+
     /// User-provided input variables
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<Input>,
 
     /// Investigation steps (queries with dependencies)
     pub steps: Vec<Step>,
+
+    /// Report generation configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<ReportConfig>,
+
+    /// Scoring engine configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scoring: Option<ScoringConfig>,
 }
 
 /// Output folder configuration
@@ -77,22 +194,140 @@ pub enum InputType {
     String,
 }
 
-/// A step in the investigation (a query with optional dependencies and extractions)
+/// A step in the investigation (a query with optional dependencies and iteration)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
-    /// Unique step name (used for references like {{step_name.var}})
+    /// Unique step name (used for references like {{step_name.*.Column}})
     pub name: String,
 
+    /// Step type: kql (default) or http
+    #[serde(rename = "type", default, skip_serializing_if = "is_default_step_type")]
+    pub step_type: StepType,
+
     /// The KQL query (may contain {{variable}} placeholders)
+    /// Required for KQL steps, should be empty for HTTP steps
+    #[serde(default)]
     pub query: String,
+
+    /// HTTP request configuration (required for HTTP steps)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<HttpRequest>,
+
+    /// HTTP response extraction configuration (required for HTTP steps)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response: Option<HttpResponse>,
+
+    /// Rate limiting configuration for HTTP steps
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimitConfig>,
+
+    /// Error handling behavior for HTTP steps (default: continue)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_error: Option<OnError>,
 
     /// Steps this step depends on (must complete first)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
 
-    /// Values to extract from query results
+    /// Condition for executing this step (if false, step is skipped)
+    /// Uses same expression syntax as verdict rules
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+
+    /// Row iteration: "step_name as alias" to iterate over source step's rows
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub foreach: Option<String>,
+
+    /// How to combine results from foreach iterations
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate: Option<AggregateStrategy>,
+
+    /// Number of rows per foreach iteration (1 = per-row, N = batched)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_size: Option<usize>,
+
+    /// Behavior when foreach source is empty
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_empty: Option<OnEmpty>,
+
+    /// Step options (quote style, chunking, deduplication)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<StepOptions>,
+
+    /// Values to extract from query results (deprecated: use direct access syntax)
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extract: HashMap<String, Extract>,
+}
+
+/// Helper function for serde skip_serializing_if on step_type
+fn is_default_step_type(step_type: &StepType) -> bool {
+    *step_type == StepType::Kql
+}
+
+/// How to aggregate results from foreach iterations
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AggregateStrategy {
+    /// Concatenate all result rows into single array
+    #[default]
+    Append,
+    /// Deep merge result objects (for single-row results)
+    Merge,
+    /// Only keep last iteration's results
+    Replace,
+    /// Wrap each iteration's results, keyed by source row
+    Collect,
+}
+
+/// Behavior when foreach source step has no results
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OnEmpty {
+    /// Skip the step entirely
+    #[default]
+    Skip,
+    /// Fail the investigation
+    Error,
+}
+
+/// Step-level options for variable substitution
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StepOptions {
+    /// Quote style for value substitution
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_style: Option<QuoteStyle>,
+
+    /// Remove duplicate values before substitution
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe: Option<bool>,
+
+    /// Maximum values per query chunk (splits into multiple queries)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_size: Option<usize>,
+}
+
+/// Parsed foreach clause
+#[derive(Debug, Clone)]
+pub struct ForeachClause {
+    /// Source step name to iterate over
+    pub source_step: String,
+    /// Alias for accessing current row/batch
+    pub alias: String,
+}
+
+impl ForeachClause {
+    /// Parse a foreach string like "step_name as alias"
+    pub fn parse(foreach: &str) -> Option<Self> {
+        let parts: Vec<&str> = foreach.split_whitespace().collect();
+        if parts.len() == 3 && parts[1].to_lowercase() == "as" {
+            Some(ForeachClause {
+                source_step: parts[0].to_string(),
+                alias: parts[2].to_string(),
+            })
+        } else {
+            None
+        }
+    }
 }
 
 /// Configuration for extracting a value from query results
@@ -137,15 +372,119 @@ pub enum ExtractType {
 }
 
 /// Quote style for value substitution
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum QuoteStyle {
     /// Single quotes: 'value' (escapes ' as '')
+    #[default]
     Single,
     /// Double quotes: "value" (escapes " as \")
     Double,
     /// KQL verbatim string: @'value' (escapes ' as '')
     Verbatim,
+}
+
+/// Report generation configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportConfig {
+    /// Output format: markdown, html, or json
+    #[serde(default = "default_report_format")]
+    pub format: ReportFormat,
+
+    /// Output filename template (supports variable substitution)
+    #[serde(default = "default_report_filename")]
+    pub output: String,
+
+    /// Report template (Tera/Jinja2-style syntax)
+    pub template: String,
+
+    /// Verdict rules evaluated in order; first match wins
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verdict_rules: Vec<VerdictRule>,
+}
+
+fn default_report_format() -> ReportFormat {
+    ReportFormat::Markdown
+}
+
+fn default_report_filename() -> String {
+    "report.md".to_string()
+}
+
+/// Report output format
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReportFormat {
+    Markdown,
+    Html,
+    Json,
+}
+
+/// A verdict rule that evaluates conditions to determine investigation outcome
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerdictRule {
+    /// Rule name for identification
+    pub name: String,
+
+    /// Condition expression (evaluated against step results)
+    /// Supports: step_name.field == value, step_name.field > value, and/or/not
+    pub condition: String,
+
+    /// Verdict level if condition matches
+    pub level: String,
+
+    /// Summary text explaining the verdict
+    pub summary: String,
+
+    /// Recommended action for the analyst
+    pub recommendation: String,
+}
+
+/// Scoring engine configuration for weighted risk assessment
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoringConfig {
+    /// Weighted indicators (positive = risk, negative = benign)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indicators: Vec<ScoringIndicator>,
+
+    /// Score thresholds for verdict levels
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thresholds: Vec<ScoringThreshold>,
+}
+
+/// A weighted indicator for the scoring engine
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoringIndicator {
+    /// Indicator name for display
+    pub name: String,
+
+    /// Condition expression (same syntax as verdict rules)
+    pub condition: String,
+
+    /// Weight value (positive = increases risk, negative = decreases risk)
+    pub weight: i32,
+
+    /// Optional description of what this indicator means
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Score threshold mapping to verdict level
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoringThreshold {
+    /// Verdict level name
+    pub level: String,
+
+    /// Minimum score for this level (inclusive)
+    pub min_score: i32,
+
+    /// Summary template (can reference {{score}})
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+
+    /// Recommendation template
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<String>,
 }
 
 impl QuoteStyle {
@@ -215,11 +554,26 @@ impl InvestigationPack {
         self.validate_kind()?;
         self.validate_steps_not_empty()?;
         self.validate_step_names_unique()?;
+        self.validate_step_types()?;
+        self.validate_foreach_syntax()?;
         self.validate_dependencies_exist()?;
         self.validate_no_circular_dependencies()?;
         self.validate_variable_references()?;
         self.validate_inputs()?;
         Ok(())
+    }
+
+    /// Get all dependencies for a step (explicit + implicit from foreach)
+    pub fn get_all_dependencies(&self, step: &Step) -> Vec<String> {
+        let mut deps = step.depends_on.clone();
+        if let Some(foreach) = &step.foreach {
+            if let Some(clause) = ForeachClause::parse(foreach) {
+                if !deps.contains(&clause.source_step) {
+                    deps.push(clause.source_step);
+                }
+            }
+        }
+        deps
     }
 
     fn validate_kind(&self) -> Result<()> {
@@ -257,10 +611,141 @@ impl InvestigationPack {
         Ok(())
     }
 
+    /// Validate step type-specific requirements (KQL vs HTTP)
+    fn validate_step_types(&self) -> Result<()> {
+        for step in &self.steps {
+            match step.step_type {
+                StepType::Kql => {
+                    // KQL steps must have a query
+                    if step.query.is_empty() {
+                        return Err(KqlPanopticonError::InvestigationPackValidation(
+                            format!("KQL step '{}' must have a 'query' field", step.name),
+                        ));
+                    }
+                    // KQL steps should not have request/response config
+                    if step.request.is_some() {
+                        return Err(KqlPanopticonError::InvestigationPackValidation(
+                            format!("KQL step '{}' should not have 'request' configuration", step.name),
+                        ));
+                    }
+                    if step.response.is_some() {
+                        return Err(KqlPanopticonError::InvestigationPackValidation(
+                            format!("KQL step '{}' should not have 'response' configuration", step.name),
+                        ));
+                    }
+                }
+                StepType::Http => {
+                    // HTTP steps must have request config
+                    if step.request.is_none() {
+                        return Err(KqlPanopticonError::InvestigationPackValidation(
+                            format!("HTTP step '{}' must have 'request' configuration", step.name),
+                        ));
+                    }
+                    // HTTP steps must have response config
+                    if step.response.is_none() {
+                        return Err(KqlPanopticonError::InvestigationPackValidation(
+                            format!("HTTP step '{}' must have 'response' configuration", step.name),
+                        ));
+                    }
+                    // HTTP steps should not have a query
+                    if !step.query.is_empty() {
+                        return Err(KqlPanopticonError::InvestigationPackValidation(
+                            format!("HTTP step '{}' should not have 'query' field", step.name),
+                        ));
+                    }
+                    // Validate response fields are not empty
+                    if let Some(response) = &step.response {
+                        if response.fields.is_empty() {
+                            return Err(KqlPanopticonError::InvestigationPackValidation(
+                                format!("HTTP step '{}' response must have at least one field mapping", step.name),
+                            ));
+                        }
+                    }
+                    // Validate secrets references in headers if any
+                    if let Some(request) = &step.request {
+                        self.validate_http_secrets_references(step, request)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate that secrets referenced in HTTP headers exist in the secrets config
+    fn validate_http_secrets_references(&self, step: &Step, request: &HttpRequest) -> Result<()> {
+        let secrets_pattern = regex::Regex::new(r"\{\{secrets\.([^}]+)\}\}").unwrap();
+        let available_secrets: HashSet<_> = self.secrets
+            .as_ref()
+            .map(|s| s.secrets.keys().cloned().collect())
+            .unwrap_or_default();
+
+        // Check headers for secrets references
+        for (header_name, header_value) in &request.headers {
+            for cap in secrets_pattern.captures_iter(header_value) {
+                let secret_name = cap.get(1).unwrap().as_str();
+                if !available_secrets.contains(secret_name) {
+                    return Err(KqlPanopticonError::InvestigationPackValidation(
+                        format!(
+                            "HTTP step '{}' header '{}' references undefined secret '{}'",
+                            step.name, header_name, secret_name
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // Check URL for secrets references
+        for cap in secrets_pattern.captures_iter(&request.url) {
+            let secret_name = cap.get(1).unwrap().as_str();
+            if !available_secrets.contains(secret_name) {
+                return Err(KqlPanopticonError::InvestigationPackValidation(
+                    format!(
+                        "HTTP step '{}' URL references undefined secret '{}'",
+                        step.name, secret_name
+                    ),
+                ));
+            }
+        }
+
+        // Check params for secrets references
+        for (param_name, param_value) in &request.params {
+            for cap in secrets_pattern.captures_iter(param_value) {
+                let secret_name = cap.get(1).unwrap().as_str();
+                if !available_secrets.contains(secret_name) {
+                    return Err(KqlPanopticonError::InvestigationPackValidation(
+                        format!(
+                            "HTTP step '{}' param '{}' references undefined secret '{}'",
+                            step.name, param_name, secret_name
+                        ),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_foreach_syntax(&self) -> Result<()> {
+        for step in &self.steps {
+            if let Some(foreach) = &step.foreach {
+                if ForeachClause::parse(foreach).is_none() {
+                    return Err(KqlPanopticonError::InvestigationPackValidation(
+                        format!(
+                            "Invalid foreach syntax in step '{}': '{}'. Expected 'step_name as alias'",
+                            step.name, foreach
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate_dependencies_exist(&self) -> Result<()> {
         let step_names: HashSet<_> = self.steps.iter().map(|s| &s.name).collect();
 
         for step in &self.steps {
+            // Check explicit dependencies
             for dep in &step.depends_on {
                 if !step_names.contains(dep) {
                     return Err(KqlPanopticonError::InvestigationPackValidation(
@@ -271,15 +756,40 @@ impl InvestigationPack {
                     ));
                 }
             }
+            // Check foreach source step exists
+            if let Some(foreach) = &step.foreach {
+                if let Some(clause) = ForeachClause::parse(foreach) {
+                    if !self.steps.iter().any(|s| s.name == clause.source_step) {
+                        return Err(KqlPanopticonError::InvestigationPackValidation(
+                            format!(
+                                "Step '{}' foreach references non-existent step '{}'",
+                                step.name, clause.source_step
+                            ),
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
     }
 
     fn validate_no_circular_dependencies(&self) -> Result<()> {
-        // Build adjacency list
+        // Build adjacency list (including implicit foreach dependencies)
         let mut graph: HashMap<&str, Vec<&str>> = HashMap::new();
         for step in &self.steps {
-            graph.insert(&step.name, step.depends_on.iter().map(|s| s.as_str()).collect());
+            let mut deps: Vec<&str> = step.depends_on.iter().map(|s| s.as_str()).collect();
+            // Add foreach source as implicit dependency
+            if let Some(foreach) = &step.foreach {
+                if let Some(clause) = ForeachClause::parse(foreach) {
+                    // Find the source step name in self.steps to get a stable reference
+                    if let Some(source) = self.steps.iter().find(|s| s.name == clause.source_step) {
+                        if !deps.contains(&source.name.as_str()) {
+                            deps.push(&source.name);
+                        }
+                    }
+                }
+            }
+            graph.insert(&step.name, deps);
         }
 
         // DFS-based cycle detection
@@ -298,6 +808,7 @@ impl InvestigationPack {
         Ok(())
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn has_cycle<'a>(
         &self,
         node: &'a str,
@@ -328,7 +839,10 @@ impl InvestigationPack {
     }
 
     fn validate_variable_references(&self) -> Result<()> {
-        // Build map of what each step provides
+        // Build set of step names
+        let step_names: HashSet<_> = self.steps.iter().map(|s| s.name.as_str()).collect();
+
+        // Build map of legacy extracts for backward compatibility
         let mut available_extracts: HashMap<String, HashSet<String>> = HashMap::new();
         for step in &self.steps {
             let extracts: HashSet<_> = step.extract.keys().cloned().collect();
@@ -338,58 +852,162 @@ impl InvestigationPack {
         // Build input names
         let input_names: HashSet<_> = self.inputs.iter().map(|i| i.name.clone()).collect();
 
-        // Check each step's query for variable references
+        // Variable patterns
         let var_pattern = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
 
         for step in &self.steps {
+            // Get foreach alias if present
+            let foreach_alias = step.foreach.as_ref()
+                .and_then(|f| ForeachClause::parse(f))
+                .map(|c| c.alias);
+
+            // Get all dependencies (explicit + implicit from foreach)
+            let all_deps = self.get_all_dependencies(step);
+
             for cap in var_pattern.captures_iter(&step.query) {
                 let var_ref = cap.get(1).unwrap().as_str().trim();
 
-                if let Some((prefix, name)) = var_ref.split_once('.') {
-                    if prefix == "inputs" {
-                        // Check input exists
-                        if !input_names.contains(name) {
-                            return Err(KqlPanopticonError::InvalidVariableReference(
-                                format!(
-                                    "Step '{}' references undefined input '{}'",
-                                    step.name, name
-                                ),
-                            ));
-                        }
-                    } else {
-                        // Must be a step reference - check it's a dependency
-                        if !step.depends_on.contains(&prefix.to_string()) {
-                            return Err(KqlPanopticonError::InvalidVariableReference(
-                                format!(
-                                    "Step '{}' references '{}' but does not declare it in depends_on",
-                                    step.name, prefix
-                                ),
-                            ));
-                        }
-
-                        // Check the extraction exists
-                        if let Some(extracts) = available_extracts.get(prefix) {
-                            if !extracts.contains(name) {
-                                return Err(KqlPanopticonError::InvalidVariableReference(
-                                    format!(
-                                        "Step '{}' references '{{{{{}}}}}' but step '{}' does not extract '{}'",
-                                        step.name, var_ref, prefix, name
-                                    ),
-                                ));
-                            }
-                        }
-                    }
-                } else {
-                    return Err(KqlPanopticonError::InvalidVariableReference(
-                        format!(
-                            "Invalid variable reference '{{{{{}}}}}' in step '{}'. Use '{{{{inputs.name}}}}' or '{{{{step.name}}}}'",
-                            var_ref, step.name
-                        ),
-                    ));
-                }
+                // Parse the variable reference
+                self.validate_single_reference(
+                    var_ref,
+                    &step.name,
+                    &input_names,
+                    &step_names,
+                    &all_deps,
+                    &available_extracts,
+                    &foreach_alias,
+                )?;
             }
         }
 
+        Ok(())
+    }
+
+    /// Validate a single variable reference
+    #[allow(clippy::too_many_arguments)]
+    fn validate_single_reference(
+        &self,
+        var_ref: &str,
+        step_name: &str,
+        input_names: &HashSet<String>,
+        step_names: &HashSet<&str>,
+        all_deps: &[String],
+        available_extracts: &HashMap<String, HashSet<String>>,
+        foreach_alias: &Option<String>,
+    ) -> Result<()> {
+        // Pattern: inputs.name
+        if let Some(input_name) = var_ref.strip_prefix("inputs.") {
+            if !input_names.contains(input_name) {
+                return Err(KqlPanopticonError::InvalidVariableReference(
+                    format!("Step '{}' references undefined input '{}'", step_name, input_name),
+                ));
+            }
+            return Ok(());
+        }
+
+        // Extract prefix (step name) from various patterns
+        // Pattern: step.*.Column (array access)
+        if let Some((prefix, _rest)) = var_ref.split_once(".*.") {
+            return self.validate_step_reference(prefix, step_name, step_names, all_deps);
+        }
+
+        // Pattern: step.first.Column (first row access)
+        if let Some((prefix, _rest)) = var_ref.split_once(".first.") {
+            return self.validate_step_reference(prefix, step_name, step_names, all_deps);
+        }
+
+        // Pattern: step[N].Column (indexed access)
+        if let Some(bracket_pos) = var_ref.find('[') {
+            let prefix = &var_ref[..bracket_pos];
+            // Verify it has closing bracket and dot
+            if var_ref.contains("].") {
+                return self.validate_step_reference(prefix, step_name, step_names, all_deps);
+            }
+        }
+
+        // Check if this matches foreach alias: alias.Column
+        if let Some(alias) = foreach_alias {
+            if var_ref.starts_with(&format!("{}.", alias)) {
+                // Valid foreach alias reference
+                return Ok(());
+            }
+        }
+
+        // Try parsing as step.something (legacy extract or direct column access)
+        if let Some((prefix, rest)) = var_ref.split_once('.') {
+            // Check if prefix is foreach alias
+            if let Some(alias) = foreach_alias {
+                if prefix == alias {
+                    return Ok(());
+                }
+            }
+
+            // Check if prefix looks like a step reference (alphanumeric/underscore)
+            let looks_like_step = prefix.chars().all(|c| c.is_alphanumeric() || c == '_');
+
+            if looks_like_step {
+                // Check if step exists
+                if !step_names.contains(prefix) {
+                    return Err(KqlPanopticonError::InvalidVariableReference(
+                        format!(
+                            "Step '{}' references non-existent step '{}'",
+                            step_name, prefix
+                        ),
+                    ));
+                }
+
+                // Validate it's a dependency
+                if !all_deps.iter().any(|d| d == prefix) {
+                    return Err(KqlPanopticonError::InvalidVariableReference(
+                        format!(
+                            "Step '{}' references '{}' but does not declare it in depends_on",
+                            step_name, prefix
+                        ),
+                    ));
+                }
+
+                // Check for legacy extract syntax: step.extract_name
+                if let Some(extracts) = available_extracts.get(prefix) {
+                    if extracts.contains(rest) {
+                        // Valid legacy extract reference
+                        return Ok(());
+                    }
+                }
+
+                // For new syntax, we assume column name is valid (can't validate at parse time)
+                return Ok(());
+            }
+        }
+
+        Err(KqlPanopticonError::InvalidVariableReference(
+            format!(
+                "Invalid variable reference '{{{{{}}}}}' in step '{}'. Use '{{{{inputs.name}}}}', '{{{{step.*.Column}}}}', or '{{{{alias.Column}}}}'",
+                var_ref, step_name
+            ),
+        ))
+    }
+
+    /// Validate that a step reference is a valid dependency
+    fn validate_step_reference(
+        &self,
+        step_ref: &str,
+        current_step: &str,
+        step_names: &HashSet<&str>,
+        all_deps: &[String],
+    ) -> Result<()> {
+        if !step_names.contains(step_ref) {
+            return Err(KqlPanopticonError::InvalidVariableReference(
+                format!("Step '{}' references non-existent step '{}'", current_step, step_ref),
+            ));
+        }
+        if !all_deps.iter().any(|d| d == step_ref) {
+            return Err(KqlPanopticonError::InvalidVariableReference(
+                format!(
+                    "Step '{}' references '{}' but does not declare it in depends_on",
+                    current_step, step_ref
+                ),
+            ));
+        }
         Ok(())
     }
 
@@ -510,6 +1128,7 @@ impl InvestigationPack {
     }
 
     /// Get summary info for display (without full validation)
+    #[allow(dead_code)]
     pub fn summary(&self) -> InvestigationPackSummary {
         InvestigationPackSummary {
             name: self.name.clone(),
@@ -522,6 +1141,7 @@ impl InvestigationPack {
 }
 
 /// Summary info for listing investigation packs
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct InvestigationPackSummary {
     pub name: String,
@@ -664,6 +1284,7 @@ steps:
 
     #[test]
     fn test_invalid_variable_reference() {
+        // Test referencing a non-existent step
         let yaml = r#"
 kind: investigation
 name: "Test"
@@ -677,7 +1298,25 @@ steps:
         let pack: InvestigationPack = serde_yaml::from_str(yaml).unwrap();
         let result = pack.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not declare it in depends_on"));
+        assert!(result.unwrap_err().to_string().contains("non-existent step"));
+
+        // Test referencing a step without declaring dependency
+        let yaml2 = r#"
+kind: investigation
+name: "Test"
+steps:
+  - name: step1
+    query: "test"
+    extract:
+      value:
+        column: col
+  - name: step2
+    query: "test | where x == {{step1.value}}"
+"#;
+        let pack2: InvestigationPack = serde_yaml::from_str(yaml2).unwrap();
+        let result2 = pack2.validate();
+        assert!(result2.is_err());
+        assert!(result2.unwrap_err().to_string().contains("does not declare it in depends_on"));
     }
 
     #[test]
@@ -779,5 +1418,203 @@ steps:
         let result = pack.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid variable reference"));
+    }
+
+    #[test]
+    fn test_foreach_syntax_valid() {
+        let yaml = r#"
+kind: investigation
+name: "Test Foreach"
+steps:
+  - name: get_users
+    query: "SigninLogs | distinct UserPrincipalName"
+  - name: user_details
+    foreach: "get_users as user"
+    query: "SigninLogs | where UserPrincipalName == {{user.UserPrincipalName}}"
+"#;
+        let pack: InvestigationPack = serde_yaml::from_str(yaml).unwrap();
+        pack.validate().unwrap();
+    }
+
+    #[test]
+    fn test_foreach_syntax_invalid() {
+        // Missing 'as' keyword
+        let yaml = r#"
+kind: investigation
+name: "Test"
+steps:
+  - name: step1
+    query: "test"
+  - name: step2
+    foreach: "step1 user"
+    query: "test"
+"#;
+        let pack: InvestigationPack = serde_yaml::from_str(yaml).unwrap();
+        let result = pack.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid foreach syntax"));
+    }
+
+    #[test]
+    fn test_foreach_nonexistent_source() {
+        let yaml = r#"
+kind: investigation
+name: "Test"
+steps:
+  - name: step1
+    foreach: "nonexistent as item"
+    query: "test"
+"#;
+        let pack: InvestigationPack = serde_yaml::from_str(yaml).unwrap();
+        let result = pack.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("non-existent step"));
+    }
+
+    #[test]
+    fn test_foreach_implicit_dependency() {
+        // Foreach should imply depends_on
+        let yaml = r#"
+kind: investigation
+name: "Test"
+steps:
+  - name: step1
+    query: "test1"
+  - name: step2
+    foreach: "step1 as item"
+    query: "test2 | where x == {{item.col}}"
+"#;
+        let pack: InvestigationPack = serde_yaml::from_str(yaml).unwrap();
+        pack.validate().unwrap();
+
+        // Check that execution order respects implicit dependency
+        let order = pack.execution_order().unwrap();
+        let names: Vec<_> = order.iter().map(|s| s.name.as_str()).collect();
+        let step1_idx = names.iter().position(|&n| n == "step1").unwrap();
+        let step2_idx = names.iter().position(|&n| n == "step2").unwrap();
+        assert!(step1_idx < step2_idx);
+    }
+
+    #[test]
+    fn test_new_variable_syntax_array() {
+        let yaml = r#"
+kind: investigation
+name: "Test Array Syntax"
+steps:
+  - name: get_users
+    query: "SigninLogs | distinct UserPrincipalName"
+  - name: filter_users
+    depends_on:
+      - get_users
+    query: "SigninLogs | where UserPrincipalName in ({{get_users.*.UserPrincipalName}})"
+"#;
+        let pack: InvestigationPack = serde_yaml::from_str(yaml).unwrap();
+        pack.validate().unwrap();
+    }
+
+    #[test]
+    fn test_new_variable_syntax_first() {
+        let yaml = r#"
+kind: investigation
+name: "Test First Syntax"
+steps:
+  - name: get_config
+    query: "ConfigTable | limit 1"
+  - name: use_config
+    depends_on:
+      - get_config
+    query: "SigninLogs | where setting == {{get_config.first.Value}}"
+"#;
+        let pack: InvestigationPack = serde_yaml::from_str(yaml).unwrap();
+        pack.validate().unwrap();
+    }
+
+    #[test]
+    fn test_new_variable_syntax_indexed() {
+        let yaml = r#"
+kind: investigation
+name: "Test Indexed Syntax"
+steps:
+  - name: get_items
+    query: "ItemTable | limit 5"
+  - name: use_second
+    depends_on:
+      - get_items
+    query: "DetailTable | where id == {{get_items[1].Id}}"
+"#;
+        let pack: InvestigationPack = serde_yaml::from_str(yaml).unwrap();
+        pack.validate().unwrap();
+    }
+
+    #[test]
+    fn test_foreach_with_options() {
+        let yaml = r#"
+kind: investigation
+name: "Test Foreach Options"
+steps:
+  - name: get_users
+    query: "SigninLogs | distinct UserPrincipalName"
+  - name: user_details
+    foreach: "get_users as user"
+    batch_size: 10
+    aggregate: append
+    on_empty: skip
+    options:
+      quote_style: single
+      dedupe: true
+    query: "AuditLogs | where Actor == {{user.UserPrincipalName}}"
+"#;
+        let pack: InvestigationPack = serde_yaml::from_str(yaml).unwrap();
+        pack.validate().unwrap();
+
+        let step = &pack.steps[1];
+        assert_eq!(step.batch_size, Some(10));
+        assert_eq!(step.aggregate, Some(AggregateStrategy::Append));
+        assert_eq!(step.on_empty, Some(OnEmpty::Skip));
+        assert!(step.options.is_some());
+    }
+
+    #[test]
+    fn test_foreach_clause_parse() {
+        // Valid syntax
+        let clause = ForeachClause::parse("step1 as item").unwrap();
+        assert_eq!(clause.source_step, "step1");
+        assert_eq!(clause.alias, "item");
+
+        // Case insensitive 'as'
+        let clause2 = ForeachClause::parse("step1 AS item").unwrap();
+        assert_eq!(clause2.source_step, "step1");
+        assert_eq!(clause2.alias, "item");
+
+        // Invalid - missing 'as'
+        assert!(ForeachClause::parse("step1 item").is_none());
+
+        // Invalid - extra parts
+        assert!(ForeachClause::parse("step1 as item extra").is_none());
+
+        // Invalid - empty
+        assert!(ForeachClause::parse("").is_none());
+    }
+
+    #[test]
+    fn test_aggregate_strategies() {
+        assert_eq!(AggregateStrategy::default(), AggregateStrategy::Append);
+
+        // Test deserialization
+        let yaml = "append";
+        let agg: AggregateStrategy = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agg, AggregateStrategy::Append);
+
+        let yaml = "merge";
+        let agg: AggregateStrategy = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agg, AggregateStrategy::Merge);
+
+        let yaml = "replace";
+        let agg: AggregateStrategy = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agg, AggregateStrategy::Replace);
+
+        let yaml = "collect";
+        let agg: AggregateStrategy = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agg, AggregateStrategy::Collect);
     }
 }

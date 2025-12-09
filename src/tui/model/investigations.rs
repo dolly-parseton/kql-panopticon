@@ -51,6 +51,7 @@ pub struct InputCollectionState {
 }
 
 /// State of an active investigation execution
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ActiveInvestigation {
     /// Pack name
@@ -68,6 +69,7 @@ pub struct ActiveInvestigation {
 }
 
 /// Progress for a single step
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct StepProgress {
     pub name: String,
@@ -76,6 +78,7 @@ pub struct StepProgress {
 }
 
 /// State of a step
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum StepState {
     Pending,
@@ -86,6 +89,7 @@ pub enum StepState {
 }
 
 /// Per-workspace progress
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct WorkspaceProgress {
     pub name: String,
@@ -96,6 +100,7 @@ pub struct WorkspaceProgress {
 }
 
 /// Overall investigation status
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum InvestigationStatus {
     Pending,
@@ -370,6 +375,7 @@ impl InvestigationEntry {
     }
 
     /// Get the pack description if available
+    #[allow(dead_code)]
     pub fn get_description(&self) -> Option<&str> {
         self.pack.as_ref()?.description.as_deref()
     }
