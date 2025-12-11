@@ -6,6 +6,7 @@ mod investigation_pack;
 mod query_job;
 mod query_pack;
 mod session;
+mod shell;
 mod tui;
 mod workspace;
 
@@ -20,8 +21,14 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        None | Some(Commands::Tui) => {
-            // Launch TUI (existing behavior)
+        None | Some(Commands::Shell) => {
+            // Launch shell (new default)
+            initialize_logger_to_file();
+            let client = Client::new()?;
+            shell::run_shell(client).await?;
+        }
+        Some(Commands::Tui) => {
+            // Launch TUI
             initialize_logger_to_file();
             let client = Client::new()?;
             tui::run_tui(client).await?;

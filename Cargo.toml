@@ -1,12 +1,73 @@
-[package]
-name = "kql-panopticon"
+[workspace]
+members = ["crates/kql-panopticon-core"]
+resolver = "2"
+
+[workspace.package]
 version = "0.3.0"
 edition = "2021"
 authors = ["dolly-parseton"]
-description = "KQL tooling for Azure Log Analytics - concurrent multi-workspace queries, chained investigations, HTTP enrichment, and automated reports"
 license = "MIT"
 repository = "https://github.com/dolly-parseton/kql-panopticon"
 homepage = "https://github.com/dolly-parseton/kql-panopticon"
+
+[workspace.dependencies]
+# Azure SDK
+azure_identity = "0.20"
+azure_core = "0.20"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# HTTP
+reqwest = { version = "0.11", features = ["json"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Utilities
+chrono = "0.4"
+regex = "1"
+walkdir = "2"
+dirs = "5.0"
+log = "0.4"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Templating & extraction
+tera = "1.19"
+jsonpath_lib = "0.3"
+
+# TUI (main crate only)
+ratatui = "0.28"
+crossterm = "0.27"
+tui-textarea = { version = "0.6", default-features = false, features = ["ratatui", "crossterm"] }
+
+# CLI (main crate only)
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+
+# Shell/REPL
+clap-repl = "0.3"
+
+# Internal
+kql-panopticon-core = { path = "crates/kql-panopticon-core" }
+
+[package]
+name = "kql-panopticon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "KQL tooling for Azure Log Analytics - concurrent multi-workspace queries, chained investigations, HTTP enrichment, and automated reports"
 readme = "README.md"
 keywords = ["azure", "kql", "log-analytics", "sentinel", "threat-hunting"]
 categories = ["command-line-utilities", "development-tools"]
@@ -22,31 +83,52 @@ exclude = [
 ]
 
 [dependencies]
-azure_identity = "0.20"
-azure_core = "0.20"
-tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.11", features = ["json"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-serde_yaml = "0.9"
-anyhow = "1.0"
-thiserror = "1.0"
-chrono = "0.4"
-clap = { version = "4", features = ["derive"] }
-futures = "0.3"
-regex = "1"
-walkdir = "2"
-ratatui = "0.28"
-crossterm = "0.27"
-tui-textarea = { version = "0.6", default-features = false, features = [
-    "ratatui",
-    "crossterm",
-] }
-log = "0.4"
-env_logger = "0.11"
-dirs = "5.0"
-tera = "1.19"
-jsonpath_lib = "0.3"  # JSONPath extraction for HTTP step responses
+# Core library
+kql-panopticon-core.workspace = true
+
+# Azure SDK
+azure_identity.workspace = true
+azure_core.workspace = true
+
+# Async
+tokio.workspace = true
+futures.workspace = true
+
+# HTTP
+reqwest.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Utilities
+chrono.workspace = true
+regex.workspace = true
+walkdir.workspace = true
+dirs.workspace = true
+log.workspace = true
+uuid.workspace = true
+
+# Templating
+tera.workspace = true
+jsonpath_lib.workspace = true
+
+# TUI
+ratatui.workspace = true
+crossterm.workspace = true
+tui-textarea.workspace = true
+
+# CLI
+clap.workspace = true
+env_logger.workspace = true
+
+# Shell/REPL
+clap-repl.workspace = true
 
 [profile.release]
 opt-level = "z"     # Optimize for size

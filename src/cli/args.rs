@@ -21,8 +21,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Launch interactive TUI (default)
+    /// Launch interactive TUI
     Tui,
+
+    /// Launch interactive shell (REPL with contextual TUI)
+    Shell,
 
     /// Run a query pack
     RunPack {

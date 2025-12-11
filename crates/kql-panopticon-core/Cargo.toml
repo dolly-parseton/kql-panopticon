@@ -1,0 +1,52 @@
+[package]
+name = "kql-panopticon-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core library for KQL query execution, chained investigations, and Azure Log Analytics integration"
+keywords = ["azure", "kql", "log-analytics", "sentinel", "library"]
+categories = ["api-bindings", "development-tools"]
+
+[features]
+default = []
+# Future: KQL validation via .NET AOT FFI
+kql-validation = []
+
+[dependencies]
+# Azure SDK
+azure_identity.workspace = true
+azure_core.workspace = true
+
+# Async
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+
+# HTTP
+reqwest.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Utilities
+chrono.workspace = true
+regex.workspace = true
+walkdir.workspace = true
+dirs.workspace = true
+log.workspace = true
+uuid.workspace = true
+
+# Templating & extraction
+tera.workspace = true
+jsonpath_lib.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
