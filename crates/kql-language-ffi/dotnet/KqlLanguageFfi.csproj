@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- Enable native exports via DNNE -->
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+
+    <!-- Assembly Info -->
+    <AssemblyName>KqlLanguageFfi</AssemblyName>
+    <RootNamespace>KqlLanguageFfi</RootNamespace>
+    <Version>0.3.0</Version>
+    <Authors>dolly-parseton</Authors>
+    <Description>Native FFI bindings for Kusto.Language</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Azure.Kusto.Language" Version="12.3.1" />
+    <PackageReference Include="DNNE" Version="2.0.5" />
+  </ItemGroup>
+
+</Project>

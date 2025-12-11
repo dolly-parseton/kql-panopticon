@@ -1,0 +1,32 @@
+[package]
+name = "kql-language-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "FFI bindings to Kusto.Language for KQL validation and language services"
+keywords = ["kql", "kusto", "validation", "ffi", "language-server"]
+categories = ["api-bindings", "development-tools"]
+
+[features]
+default = []
+# Use bundled native library (requires pre-built binaries)
+bundled = []
+
+[dependencies]
+# FFI loading
+libloading = { workspace = true }
+
+# Serialization (for JSON protocol)
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+log = { workspace = true }
+
+# Thread-safe singleton
+once_cell = { workspace = true }
