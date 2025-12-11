@@ -1,6 +1,15 @@
 //! Variable reference parsing
 //!
 //! Parses `{{...}}` variable references from strings.
+//!
+//! ## Supported Syntax
+//!
+//! - `{{inputs.name}}` - User-provided input value
+//! - `{{secrets.name}}` - Environment variable secret
+//! - `{{step.*.Column}}` - All values from a column (array)
+//! - `{{step.first.Column}}` - First row's column value
+//! - `{{step[N].Column}}` - Nth row's column value
+//! - `{{alias.Column}}` - Current row in foreach iteration
 
 use crate::error::{Error, Result};
 use regex::Regex;
@@ -9,6 +18,11 @@ use std::sync::LazyLock;
 /// Regex for matching variable references
 static VAR_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\{\{([^}]+)\}\}").expect("Invalid regex")
+});
+
+/// Regex for index syntax like "step[0]"
+static INDEX_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^([a-zA-Z_][a-zA-Z0-9_]*)\[(\d+)\]$").expect("Invalid regex")
 });
 
 /// A parsed variable reference
@@ -28,6 +42,9 @@ pub enum VarRefType {
     /// User input: `{{inputs.name}}`
     Input { name: String },
 
+    /// Secret from environment: `{{secrets.name}}`
+    Secret { name: String },
+
     /// All values from column: `{{step.*.column}}`
     StepArray { step: String, column: String },
 
@@ -40,12 +57,6 @@ pub enum VarRefType {
     /// Foreach alias: `{{alias.column}}`
     Alias { alias: String, column: String },
 
-    /// Secret from environment: `{{secrets.name}}`
-    Secret { name: String },
-
-    /// Legacy extraction format: `{{step.extract_name}}`
-    LegacyExtract { step: String, extract: String },
-
     /// Unknown/unparseable reference
     Unknown { content: String },
 }
@@ -57,7 +68,7 @@ impl VarRef {
             .captures_iter(input)
             .map(|cap| {
                 let full_match = cap.get(0).unwrap().as_str().to_string();
-                let inner = cap.get(1).unwrap().as_str().to_string();
+                let inner = cap.get(1).unwrap().as_str().trim().to_string();
                 let ref_type = Self::parse_ref_type(&inner);
                 VarRef {
                     full_match,
@@ -100,17 +111,17 @@ impl VarRef {
                 column: (*column).to_string(),
             },
 
-            // {{step.column}} - could be alias or legacy extract
+            // {{step_or_alias.column}} or {{step[N].column}}
             [step_or_alias, column] => {
                 // Check for index syntax: step[N]
-                if let Some(idx_match) = parse_index_syntax(step_or_alias) {
+                if let Some((step, index)) = parse_index_syntax(step_or_alias) {
                     VarRefType::StepIndex {
-                        step: idx_match.0,
-                        index: idx_match.1,
+                        step,
+                        index,
                         column: (*column).to_string(),
                     }
                 } else {
-                    // Treat as alias reference (context-dependent)
+                    // Treat as alias reference (context-dependent at resolution time)
                     VarRefType::Alias {
                         alias: (*step_or_alias).to_string(),
                         column: (*column).to_string(),
@@ -122,6 +133,21 @@ impl VarRef {
             _ => VarRefType::Unknown {
                 content: inner.to_string(),
             },
+        }
+    }
+
+    /// Check if this is an array reference (returns multiple values)
+    pub fn is_array(&self) -> bool {
+        matches!(self.ref_type, VarRefType::StepArray { .. })
+    }
+
+    /// Get the step name this reference depends on (if any)
+    pub fn step_dependency(&self) -> Option<&str> {
+        match &self.ref_type {
+            VarRefType::StepArray { step, .. } => Some(step),
+            VarRefType::StepFirst { step, .. } => Some(step),
+            VarRefType::StepIndex { step, .. } => Some(step),
+            _ => None,
         }
     }
 
@@ -146,18 +172,52 @@ impl VarRef {
                     )));
                 }
             }
-            _ => {}
+            VarRefType::Alias { alias, .. } => {
+                // Aliases are validated at execution time when foreach context is known
+                // Could also be a step reference - try both
+                if !available_steps.contains(&alias.as_str()) {
+                    // Not a known step - assume it's a foreach alias (validated at runtime)
+                }
+            }
+            VarRefType::Secret { .. } => {
+                // Secrets are validated at execution time against environment
+            }
+            VarRefType::Unknown { content } => {
+                return Err(Error::variable(format!(
+                    "Unknown variable syntax: '{}'",
+                    content
+                )));
+            }
         }
         Ok(())
+    }
+
+    /// Generate a default placeholder value for validation
+    pub fn default_placeholder(&self) -> String {
+        match &self.ref_type {
+            VarRefType::Input { name } => format!("placeholder_{}", name),
+            VarRefType::Secret { name } => format!("secret_{}", name),
+            VarRefType::StepArray { step, column } => {
+                format!("'placeholder_{}_{}', 'placeholder_{}_{}_2'", step, column, step, column)
+            }
+            VarRefType::StepFirst { step, column } => {
+                format!("placeholder_{}_{}", step, column)
+            }
+            VarRefType::StepIndex { step, index, column } => {
+                format!("placeholder_{}_{}_{}", step, index, column)
+            }
+            VarRefType::Alias { alias, column } => {
+                format!("placeholder_{}_{}", alias, column)
+            }
+            VarRefType::Unknown { content } => {
+                format!("unknown_{}", content.replace('.', "_"))
+            }
+        }
     }
 }
 
 /// Parse index syntax like "step[0]" -> ("step", 0)
 fn parse_index_syntax(s: &str) -> Option<(String, usize)> {
-    static INDEX_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^([a-zA-Z_][a-zA-Z0-9_]*)\[(\d+)\]$").expect("Invalid regex")
-    });
-
     INDEX_REGEX.captures(s).map(|cap| {
         let step = cap.get(1).unwrap().as_str().to_string();
         let index: usize = cap.get(2).unwrap().as_str().parse().unwrap();
@@ -180,13 +240,24 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_secret() {
+        let refs = VarRef::parse_all("Token: {{secrets.api_key}}");
+        assert_eq!(refs.len(), 1);
+        assert!(matches!(
+            &refs[0].ref_type,
+            VarRefType::Secret { name } if name == "api_key"
+        ));
+    }
+
+    #[test]
     fn test_parse_step_array() {
-        let refs = VarRef::parse_all("SELECT * WHERE id IN ({{users.*.UserId}})");
+        let refs = VarRef::parse_all("WHERE id IN ({{users.*.UserId}})");
         assert_eq!(refs.len(), 1);
         assert!(matches!(
             &refs[0].ref_type,
             VarRefType::StepArray { step, column } if step == "users" && column == "UserId"
         ));
+        assert!(refs[0].is_array());
     }
 
     #[test]
@@ -196,6 +267,28 @@ mod tests {
         assert!(matches!(
             &refs[0].ref_type,
             VarRefType::StepFirst { step, column } if step == "results" && column == "Name"
+        ));
+        assert!(!refs[0].is_array());
+    }
+
+    #[test]
+    fn test_parse_step_index() {
+        let refs = VarRef::parse_all("{{users[0].Email}}");
+        assert_eq!(refs.len(), 1);
+        assert!(matches!(
+            &refs[0].ref_type,
+            VarRefType::StepIndex { step, index, column }
+                if step == "users" && *index == 0 && column == "Email"
+        ));
+    }
+
+    #[test]
+    fn test_parse_alias() {
+        let refs = VarRef::parse_all("WHERE user = '{{u.UserPrincipalName}}'");
+        assert_eq!(refs.len(), 1);
+        assert!(matches!(
+            &refs[0].ref_type,
+            VarRefType::Alias { alias, column } if alias == "u" && column == "UserPrincipalName"
         ));
     }
 
@@ -209,5 +302,22 @@ mod tests {
     fn test_contains_vars() {
         assert!(VarRef::contains_vars("Hello {{name}}"));
         assert!(!VarRef::contains_vars("Hello world"));
+    }
+
+    #[test]
+    fn test_step_dependency() {
+        let refs = VarRef::parse_all("{{users.*.Id}}");
+        assert_eq!(refs[0].step_dependency(), Some("users"));
+
+        let refs = VarRef::parse_all("{{inputs.name}}");
+        assert_eq!(refs[0].step_dependency(), None);
+    }
+
+    #[test]
+    fn test_default_placeholder() {
+        let refs = VarRef::parse_all("{{users.*.Email}}");
+        let placeholder = refs[0].default_placeholder();
+        assert!(placeholder.contains("placeholder"));
+        assert!(placeholder.contains("users"));
     }
 }

@@ -1,212 +1,224 @@
-//! KQL validation module (optional feature)
+//! KQL validation module
 //!
-//! This module provides KQL syntax and schema validation.
-//! It is only compiled when the `kql-validation` feature is enabled.
+//! This module provides KQL syntax and schema validation using the
+//! Microsoft.Azure.Kusto.Language library via FFI bindings.
 //!
-//! ## Implementation Options
+//! ## Features
 //!
-//! ### Option 1: .NET AOT FFI (Full Validation)
-//!
-//! Uses the official Microsoft.Azure.Kusto.Language library compiled to
-//! a native library via .NET AOT. This provides:
-//! - Full KQL syntax validation
-//! - Schema-aware semantic validation
-//! - Comprehensive error messages
-//!
-//! ### Option 2: rust-kql (Subset Validation)
-//!
-//! Uses the community rust-kql crate for basic syntax checking.
-//! This provides:
-//! - Basic KQL syntax validation
-//! - No schema awareness
-//! - Limited operator support
+//! - **Syntax Validation**: Validates KQL query syntax without schema context
+//! - **Schema-Aware Validation**: Validates queries against table/column definitions
+//! - **Detailed Diagnostics**: Line/column positions, error codes, severity levels
 //!
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use kql_panopticon_core::validation::{KqlValidator, ValidationResult};
+//! use kql_panopticon_core::validation::{KqlValidator, Schema, Table, Column};
 //!
+//! // Create validator (loads native library)
 //! let validator = KqlValidator::new()?;
-//! let result = validator.validate("SecurityEvent | take 10")?;
 //!
+//! // Syntax-only validation
+//! let result = validator.validate_syntax("SecurityEvent | take 10")?;
 //! if result.is_valid() {
-//!     println!("Query is valid");
-//! } else {
-//!     for error in result.errors() {
-//!         println!("Error at line {}: {}", error.line, error.message);
-//!     }
+//!     println!("Query syntax is valid");
+//! }
+//!
+//! // Schema-aware validation
+//! let schema = Schema {
+//!     tables: vec![
+//!         Table {
+//!             name: "SecurityEvent".to_string(),
+//!             columns: vec![
+//!                 Column { name: "TimeGenerated".to_string(), data_type: "datetime".to_string() },
+//!                 Column { name: "Computer".to_string(), data_type: "string".to_string() },
+//!             ],
+//!         },
+//!     ],
+//!     ..Default::default()
+//! };
+//!
+//! let result = validator.validate_with_schema("SecurityEvent | where Computer == 'srv01'", &schema)?;
+//! for diagnostic in result.diagnostics() {
+//!     println!("[{}] {}", diagnostic.severity, diagnostic.message);
 //! }
 //! ```
 
-use crate::error::Result;
+use crate::error::{Error, Result};
+
+// Re-export types from kql-language-ffi for convenience
+pub use kql_language_ffi::{Column, Diagnostic, DiagnosticSeverity, Function, Schema, Table, ValidationResult};
 
 /// KQL query validator
 ///
-/// Validates KQL queries for syntax and optionally semantic correctness.
+/// Wraps the FFI bindings to Microsoft's Kusto.Language library.
+/// The validator is created once and can be reused for multiple queries.
 pub struct KqlValidator {
-    // TODO: Add FFI handle to .NET AOT library
-    // or rust-kql parser instance
-    _placeholder: (),
+    inner: kql_language_ffi::KqlValidator,
 }
 
 impl KqlValidator {
     /// Create a new validator
     ///
-    /// For .NET AOT: Loads the native library
-    /// For rust-kql: Initializes the parser
+    /// This loads the native library and initializes the Kusto parser.
+    /// The library is loaded once per process and cached.
     pub fn new() -> Result<Self> {
-        // TODO: Initialize based on available backend
-        todo!("Initialize KQL validator")
+        let inner = kql_language_ffi::KqlValidator::new().map_err(|e| Error::Validation {
+            message: format!("Failed to initialize KQL validator: {}", e),
+            line: None,
+            column: None,
+        })?;
+
+        Ok(Self { inner })
     }
 
     /// Validate a KQL query (syntax only)
+    ///
+    /// Checks the query for syntax errors without any schema context.
+    /// This is faster than schema-aware validation but won't catch
+    /// semantic errors like unknown table or column names.
     pub fn validate_syntax(&self, query: &str) -> Result<ValidationResult> {
-        let _ = query;
-        todo!("Implement syntax validation")
+        self.inner.validate_syntax(query).map_err(|e| Error::Validation {
+            message: format!("Syntax validation failed: {}", e),
+            line: None,
+            column: None,
+        })
     }
 
     /// Validate with schema awareness
     ///
-    /// Requires schema definition (table names, column types, etc.)
-    pub fn validate_with_schema(
-        &self,
-        query: &str,
-        schema: &Schema,
-    ) -> Result<ValidationResult> {
-        let _ = (query, schema);
-        todo!("Implement schema-aware validation")
+    /// Validates the query against the provided schema, catching errors like:
+    /// - Unknown table names
+    /// - Unknown column names
+    /// - Type mismatches in comparisons
+    /// - Invalid function arguments
+    pub fn validate_with_schema(&self, query: &str, schema: &Schema) -> Result<ValidationResult> {
+        self.inner
+            .validate_with_schema(query, schema)
+            .map_err(|e| Error::Validation {
+                message: format!("Schema validation failed: {}", e),
+                line: None,
+                column: None,
+            })
     }
 
-    /// Parse query and return AST (for advanced use cases)
-    pub fn parse(&self, query: &str) -> Result<ParsedQuery> {
-        let _ = query;
-        todo!("Implement query parsing")
-    }
-}
-
-/// Result of query validation
-#[derive(Debug, Clone)]
-pub struct ValidationResult {
-    /// Whether the query is valid
-    pub valid: bool,
-    /// Validation errors (if any)
-    pub errors: Vec<ValidationError>,
-    /// Warnings (valid but potentially problematic)
-    pub warnings: Vec<ValidationWarning>,
-}
-
-impl ValidationResult {
-    /// Check if validation passed
-    pub fn is_valid(&self) -> bool {
-        self.valid && self.errors.is_empty()
+    /// Check if schema validation is supported
+    ///
+    /// Returns true if the native library supports schema-aware validation.
+    pub fn supports_schema_validation(&self) -> bool {
+        self.inner.supports_schema_validation()
     }
 
-    /// Get error messages
-    pub fn errors(&self) -> &[ValidationError] {
-        &self.errors
+    /// Check if completion is supported (Phase 2)
+    ///
+    /// Returns true if the native library supports code completion.
+    pub fn supports_completion(&self) -> bool {
+        self.inner.supports_completion()
     }
 
-    /// Get warning messages
-    pub fn warnings(&self) -> &[ValidationWarning] {
-        &self.warnings
+    /// Check if classification is supported (Phase 3)
+    ///
+    /// Returns true if the native library supports syntax classification.
+    pub fn supports_classification(&self) -> bool {
+        self.inner.supports_classification()
     }
 }
 
-/// A validation error
-#[derive(Debug, Clone)]
-pub struct ValidationError {
-    /// Error message
-    pub message: String,
-    /// Line number (1-based)
-    pub line: usize,
-    /// Column number (1-based)
-    pub column: usize,
-    /// Length of the problematic span
-    pub length: usize,
-    /// Error code (if available)
-    pub code: Option<String>,
+/// Extension trait for ValidationResult convenience methods
+pub trait ValidationResultExt {
+    /// Check if the query is valid (no errors)
+    fn is_valid(&self) -> bool;
+
+    /// Get all diagnostics
+    fn diagnostics(&self) -> &[Diagnostic];
+
+    /// Get only error-level diagnostics
+    fn errors(&self) -> Vec<&Diagnostic>;
+
+    /// Get only warning-level diagnostics
+    fn warnings(&self) -> Vec<&Diagnostic>;
 }
 
-/// A validation warning
-#[derive(Debug, Clone)]
-pub struct ValidationWarning {
-    /// Warning message
-    pub message: String,
-    /// Line number (1-based)
-    pub line: usize,
-    /// Column number (1-based)
-    pub column: usize,
+impl ValidationResultExt for ValidationResult {
+    fn is_valid(&self) -> bool {
+        self.valid
+    }
+
+    fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    fn errors(&self) -> Vec<&Diagnostic> {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Error)
+            .collect()
+    }
+
+    fn warnings(&self) -> Vec<&Diagnostic> {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Warning)
+            .collect()
+    }
 }
 
-/// Schema definition for semantic validation
-#[derive(Debug, Clone, Default)]
-pub struct Schema {
-    /// Tables in the schema
-    pub tables: Vec<Table>,
-    /// Functions in the schema
-    pub functions: Vec<Function>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Table definition
-#[derive(Debug, Clone)]
-pub struct Table {
-    /// Table name
-    pub name: String,
-    /// Columns
-    pub columns: Vec<Column>,
-}
+    // Note: These tests require the native library to be built and available.
+    // Run `./build.sh` in crates/kql-language-ffi/dotnet first.
 
-/// Column definition
-#[derive(Debug, Clone)]
-pub struct Column {
-    /// Column name
-    pub name: String,
-    /// KQL data type
-    pub data_type: String,
-}
+    #[test]
+    #[ignore = "requires native library"]
+    fn test_validator_creation() {
+        let validator = KqlValidator::new();
+        assert!(validator.is_ok(), "Failed to create validator: {:?}", validator.err());
+    }
 
-/// Function definition
-#[derive(Debug, Clone)]
-pub struct Function {
-    /// Function name
-    pub name: String,
-    /// Parameter types
-    pub parameters: Vec<String>,
-    /// Return type
-    pub return_type: String,
-}
+    #[test]
+    #[ignore = "requires native library"]
+    fn test_valid_syntax() {
+        let validator = KqlValidator::new().unwrap();
+        let result = validator.validate_syntax("SecurityEvent | take 10").unwrap();
+        assert!(result.is_valid());
+        assert!(result.diagnostics().is_empty());
+    }
 
-/// Parsed query representation
-#[derive(Debug, Clone)]
-pub struct ParsedQuery {
-    /// Referenced tables
-    pub tables: Vec<String>,
-    /// Referenced columns
-    pub columns: Vec<String>,
-    /// Operators used
-    pub operators: Vec<String>,
-    /// Time range (if specified)
-    pub time_range: Option<String>,
-}
+    #[test]
+    #[ignore = "requires native library"]
+    fn test_invalid_syntax() {
+        let validator = KqlValidator::new().unwrap();
+        let result = validator.validate_syntax("SecurityEvent | take").unwrap();
+        assert!(!result.is_valid());
+        assert!(!result.diagnostics().is_empty());
+    }
 
-// FFI types for .NET AOT integration
-#[cfg(feature = "kql-validation")]
-mod ffi {
-    //! FFI bindings for .NET AOT KQL validator
-    //!
-    //! These bindings will be generated/implemented when the .NET AOT
-    //! library is built and integrated.
+    #[test]
+    #[ignore = "requires native library"]
+    fn test_schema_validation() {
+        let validator = KqlValidator::new().unwrap();
 
-    /// Initialize the validator library
-    #[allow(dead_code)]
-    extern "C" {
-        fn kql_validator_init() -> i32;
-        fn kql_validator_cleanup();
-        fn kql_validate_syntax(
-            query: *const u8,
-            query_len: i32,
-            errors: *mut u8,
-            errors_len: i32,
-        ) -> i32;
+        let schema = Schema {
+            tables: vec![Table {
+                name: "SecurityEvent".to_string(),
+                columns: vec![
+                    Column {
+                        name: "TimeGenerated".to_string(),
+                        data_type: "datetime".to_string(),
+                    },
+                    Column {
+                        name: "Computer".to_string(),
+                        data_type: "string".to_string(),
+                    },
+                ],
+            }],
+            functions: vec![],
+        };
+
+        let result = validator
+            .validate_with_schema("SecurityEvent | where Computer == 'srv01'", &schema)
+            .unwrap();
+        assert!(result.is_valid());
     }
 }

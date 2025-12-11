@@ -1,59 +1,30 @@
 //! Variable substitution engine
 //!
-//! Replaces variable references with actual values.
+//! Replaces variable references with actual values from step results,
+//! inputs, secrets, and foreach iteration context.
 
-use super::{ExtractedValue, VarRef, VarRefType};
+use super::{VarRef, VarRefType};
 use crate::error::{Error, Result};
-use serde::{Deserialize, Serialize};
+use crate::pack::{ExampleValue, QuoteStyle};
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
-/// Quote style for substituted values
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum QuoteStyle {
-    /// Single quotes: 'value'
-    #[default]
-    Single,
-    /// Double quotes: "value"
-    Double,
-    /// No quotes: value
-    Verbatim,
-}
-
-impl QuoteStyle {
-    /// Quote a single value
-    pub fn quote(&self, value: &str) -> String {
-        match self {
-            Self::Single => format!("'{}'", value.replace('\'', "''")),
-            Self::Double => format!("\"{}\"", value.replace('"', "\\\"")),
-            Self::Verbatim => value.to_string(),
-        }
-    }
-
-    /// Quote an array of values and join
-    pub fn quote_array(&self, values: &[String]) -> String {
-        values
-            .iter()
-            .map(|v| self.quote(v))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-}
-
-/// Context for variable substitution
+/// Context for variable substitution during execution
 #[derive(Debug, Default)]
 pub struct SubstitutionContext {
     /// User-provided inputs
     pub inputs: HashMap<String, String>,
-    /// Extracted values from steps
-    pub extractions: HashMap<String, ExtractedValue>,
-    /// Step results (for direct column access)
-    pub step_results: HashMap<String, Vec<serde_json::Value>>,
+
+    /// Step results (step_name -> rows as JSON objects)
+    pub step_results: HashMap<String, Vec<JsonValue>>,
+
     /// Current foreach row (alias -> row data)
-    pub foreach_row: Option<(String, serde_json::Value)>,
+    pub foreach_row: Option<(String, JsonValue)>,
+
     /// Secrets (resolved from environment)
     pub secrets: HashMap<String, String>,
-    /// Default quote style
+
+    /// Default quote style for values
     pub default_quote_style: QuoteStyle,
 }
 
@@ -69,24 +40,18 @@ impl SubstitutionContext {
         self
     }
 
-    /// Add an extraction
-    pub fn with_extraction(mut self, name: impl Into<String>, value: ExtractedValue) -> Self {
-        self.extractions.insert(name.into(), value);
-        self
-    }
-
     /// Add step results
     pub fn with_step_results(
         mut self,
         step: impl Into<String>,
-        results: Vec<serde_json::Value>,
+        results: Vec<JsonValue>,
     ) -> Self {
         self.step_results.insert(step.into(), results);
         self
     }
 
-    /// Set foreach row
-    pub fn with_foreach_row(mut self, alias: impl Into<String>, row: serde_json::Value) -> Self {
+    /// Set foreach row context
+    pub fn with_foreach_row(mut self, alias: impl Into<String>, row: JsonValue) -> Self {
         self.foreach_row = Some((alias.into(), row));
         self
     }
@@ -97,7 +62,13 @@ impl SubstitutionContext {
         self
     }
 
-    /// Resolve a variable reference
+    /// Set default quote style
+    pub fn with_quote_style(mut self, style: QuoteStyle) -> Self {
+        self.default_quote_style = style;
+        self
+    }
+
+    /// Resolve a variable reference to its value
     pub fn resolve(&self, var_ref: &VarRef) -> Result<String> {
         self.resolve_with_quote_style(var_ref, self.default_quote_style)
     }
@@ -123,14 +94,14 @@ impl SubstitutionContext {
 
             VarRefType::StepArray { step, column } => {
                 let values = self.get_column_values(step, column)?;
-                Ok(quote_style.quote_array(&values))
+                Ok(quote_style.format_array(&values))
             }
 
             VarRefType::StepFirst { step, column } => {
                 let values = self.get_column_values(step, column)?;
                 values
                     .first()
-                    .map(|v| quote_style.quote(v))
+                    .map(|v| quote_style.format_value(v))
                     .ok_or_else(|| Error::variable(format!("Step '{}' has no results", step)))
             }
 
@@ -138,7 +109,7 @@ impl SubstitutionContext {
                 let values = self.get_column_values(step, column)?;
                 values
                     .get(*index)
-                    .map(|v| quote_style.quote(v))
+                    .map(|v| quote_style.format_value(v))
                     .ok_or_else(|| {
                         Error::variable(format!(
                             "Step '{}' has no row at index {}",
@@ -150,36 +121,20 @@ impl SubstitutionContext {
             VarRefType::Alias { alias, column } => {
                 if let Some((current_alias, row)) = &self.foreach_row {
                     if current_alias == alias {
-                        let value = row
-                            .get(column)
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| {
-                                row.get(column)
-                                    .map(|v| v.to_string())
-                                    .unwrap_or_default()
-                            });
-                        return Ok(quote_style.quote(&value));
+                        let value = extract_json_value(row, column);
+                        return Ok(quote_style.format_value(&value));
                     }
                 }
-                // Try as legacy extraction
-                self.extractions
-                    .get(&format!("{}.{}", alias, column))
-                    .or_else(|| self.extractions.get(alias))
-                    .map(|v| v.to_substitution_string(quote_style))
-                    .ok_or_else(|| {
-                        Error::variable(format!("Alias '{}' not in scope", alias))
-                    })
-            }
-
-            VarRefType::LegacyExtract { step, extract } => {
-                let key = format!("{}.{}", step, extract);
-                self.extractions
-                    .get(&key)
-                    .map(|v| v.to_substitution_string(quote_style))
-                    .ok_or_else(|| {
-                        Error::variable(format!("Extraction '{}.{}' not found", step, extract))
-                    })
+                // Not a foreach alias - try as a step reference (first row)
+                if let Ok(values) = self.get_column_values(alias, column) {
+                    if let Some(v) = values.first() {
+                        return Ok(quote_style.format_value(v));
+                    }
+                }
+                Err(Error::variable(format!(
+                    "Alias '{}' not found in foreach context or as step",
+                    alias
+                )))
             }
 
             VarRefType::Unknown { content } => {
@@ -196,20 +151,97 @@ impl SubstitutionContext {
 
         let values: Vec<String> = results
             .iter()
-            .filter_map(|row| {
-                row.get(column).map(|v| {
-                    v.as_str()
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| v.to_string())
-                })
-            })
+            .map(|row| extract_json_value(row, column))
+            .filter(|s| !s.is_empty())
             .collect();
 
         Ok(values)
     }
 }
 
-/// Substitute all variables in a string
+/// Context for validation substitution (uses example/placeholder values)
+#[derive(Debug, Default)]
+pub struct ValidationContext {
+    /// User-defined examples (var_ref inner -> value)
+    pub examples: HashMap<String, ExampleValue>,
+
+    /// Input examples (from input definitions)
+    pub input_examples: HashMap<String, String>,
+
+    /// Default quote style
+    pub default_quote_style: QuoteStyle,
+
+    /// Track which substitutions used defaults
+    pub used_defaults: Vec<String>,
+}
+
+impl ValidationContext {
+    /// Create a new validation context
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add an example value
+    pub fn with_example(mut self, var_ref: impl Into<String>, value: ExampleValue) -> Self {
+        self.examples.insert(var_ref.into(), value);
+        self
+    }
+
+    /// Add input example
+    pub fn with_input_example(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.input_examples.insert(name.into(), value.into());
+        self
+    }
+
+    /// Set quote style
+    pub fn with_quote_style(mut self, style: QuoteStyle) -> Self {
+        self.default_quote_style = style;
+        self
+    }
+
+    /// Resolve a variable reference for validation
+    pub fn resolve(&mut self, var_ref: &VarRef) -> String {
+        self.resolve_with_quote_style(var_ref, self.default_quote_style)
+    }
+
+    /// Resolve with specific quote style
+    pub fn resolve_with_quote_style(
+        &mut self,
+        var_ref: &VarRef,
+        quote_style: QuoteStyle,
+    ) -> String {
+        // Check for user-defined example
+        if let Some(example) = self.examples.get(&var_ref.inner) {
+            return match example {
+                ExampleValue::Single(s) => quote_style.format_value(s),
+                ExampleValue::Array(arr) => quote_style.format_array(arr),
+            };
+        }
+
+        // Check for input example
+        if let VarRefType::Input { name } = &var_ref.ref_type {
+            if let Some(example) = self.input_examples.get(name) {
+                return example.clone();
+            }
+        }
+
+        // Use default placeholder and track it
+        self.used_defaults.push(var_ref.inner.clone());
+        var_ref.default_placeholder()
+    }
+
+    /// Get count of substitutions that used defaults
+    pub fn default_count(&self) -> usize {
+        self.used_defaults.len()
+    }
+
+    /// Get list of variable refs that used defaults
+    pub fn defaults_used(&self) -> &[String] {
+        &self.used_defaults
+    }
+}
+
+/// Substitute all variables in a string using execution context
 pub fn substitute(input: &str, context: &SubstitutionContext) -> Result<String> {
     substitute_with_quote_style(input, context, context.default_quote_style)
 }
@@ -235,35 +267,59 @@ pub fn substitute_with_quote_style(
     Ok(result)
 }
 
+/// Substitute variables for validation (using examples/placeholders)
+pub fn substitute_for_validation(input: &str, context: &mut ValidationContext) -> String {
+    substitute_for_validation_with_quote_style(input, context, context.default_quote_style)
+}
+
+/// Substitute for validation with specific quote style
+pub fn substitute_for_validation_with_quote_style(
+    input: &str,
+    context: &mut ValidationContext,
+    quote_style: QuoteStyle,
+) -> String {
+    let vars = VarRef::parse_all(input);
+
+    if vars.is_empty() {
+        return input.to_string();
+    }
+
+    let mut result = input.to_string();
+    for var in vars {
+        let replacement = context.resolve_with_quote_style(&var, quote_style);
+        result = result.replace(&var.full_match, &replacement);
+    }
+
+    result
+}
+
+/// Extract a value from a JSON object by column name
+fn extract_json_value(row: &JsonValue, column: &str) -> String {
+    row.get(column)
+        .map(|v| match v {
+            JsonValue::Null => String::new(),
+            JsonValue::Bool(b) => b.to_string(),
+            JsonValue::Number(n) => n.to_string(),
+            JsonValue::String(s) => s.clone(),
+            JsonValue::Array(_) | JsonValue::Object(_) => v.to_string(),
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_quote_styles() {
-        assert_eq!(QuoteStyle::Single.quote("test"), "'test'");
-        assert_eq!(QuoteStyle::Double.quote("test"), "\"test\"");
-        assert_eq!(QuoteStyle::Verbatim.quote("test"), "test");
-    }
-
-    #[test]
-    fn test_quote_escaping() {
-        assert_eq!(QuoteStyle::Single.quote("it's"), "'it''s'");
-        assert_eq!(QuoteStyle::Double.quote("say \"hi\""), "\"say \\\"hi\\\"\"");
-    }
-
-    #[test]
     fn test_substitute_input() {
         let context = SubstitutionContext::new().with_input("name", "Alice");
-
         let result = substitute("Hello {{inputs.name}}!", &context).unwrap();
         assert_eq!(result, "Hello Alice!");
     }
 
     #[test]
-    fn test_substitute_missing() {
+    fn test_substitute_missing_input() {
         let context = SubstitutionContext::new();
-
         let result = substitute("Hello {{inputs.name}}!", &context);
         assert!(result.is_err());
     }
@@ -276,8 +332,92 @@ mod tests {
         ];
 
         let context = SubstitutionContext::new().with_step_results("users", results);
-
         let result = substitute("WHERE id IN ({{users.*.id}})", &context).unwrap();
-        assert_eq!(result, "WHERE id IN ('1', '2')");
+        assert_eq!(result, "WHERE id IN ('1','2')");
+    }
+
+    #[test]
+    fn test_substitute_step_first() {
+        let results = vec![
+            serde_json::json!({"id": "1", "name": "Alice"}),
+        ];
+
+        let context = SubstitutionContext::new().with_step_results("users", results);
+        let result = substitute("WHERE id = {{users.first.id}}", &context).unwrap();
+        assert_eq!(result, "WHERE id = '1'");
+    }
+
+    #[test]
+    fn test_substitute_foreach() {
+        let row = serde_json::json!({"id": "42", "email": "test@example.com"});
+        let context = SubstitutionContext::new().with_foreach_row("u", row);
+
+        let result = substitute("WHERE id = {{u.id}}", &context).unwrap();
+        assert_eq!(result, "WHERE id = '42'");
+    }
+
+    #[test]
+    fn test_validation_with_examples() {
+        let mut context = ValidationContext::new()
+            .with_example("users.*.Email", ExampleValue::Array(vec![
+                "user1@example.com".to_string(),
+                "user2@example.com".to_string(),
+            ]));
+
+        let result = substitute_for_validation(
+            "WHERE Email IN ({{users.*.Email}})",
+            &mut context,
+        );
+
+        assert!(result.contains("user1@example.com"));
+        assert!(result.contains("user2@example.com"));
+        assert_eq!(context.default_count(), 0);
+    }
+
+    #[test]
+    fn test_validation_with_defaults() {
+        let mut context = ValidationContext::new();
+
+        let result = substitute_for_validation(
+            "WHERE User = '{{inputs.target}}'",
+            &mut context,
+        );
+
+        assert!(result.contains("placeholder"));
+        assert_eq!(context.default_count(), 1);
+        assert!(context.defaults_used().contains(&"inputs.target".to_string()));
+    }
+
+    #[test]
+    fn test_validation_input_example() {
+        let mut context = ValidationContext::new()
+            .with_input_example("url", "https://example.com/test");
+
+        let result = substitute_for_validation(
+            "WHERE Url == '{{inputs.url}}'",
+            &mut context,
+        );
+
+        assert!(result.contains("https://example.com/test"));
+        assert_eq!(context.default_count(), 0);
+    }
+
+    #[test]
+    fn test_quote_styles() {
+        let context = SubstitutionContext::new()
+            .with_input("name", "O'Brien")
+            .with_quote_style(QuoteStyle::Single);
+
+        let result = substitute("WHERE name = {{inputs.name}}", &context).unwrap();
+        assert_eq!(result, "WHERE name = O'Brien");
+
+        // With explicit quoting
+        let result = substitute_with_quote_style(
+            "WHERE name = {{inputs.name}}",
+            &context,
+            QuoteStyle::Single,
+        ).unwrap();
+        // Note: inputs are returned raw, quoting is for step results
+        assert_eq!(result, "WHERE name = O'Brien");
     }
 }

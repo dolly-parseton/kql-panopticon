@@ -11,8 +11,6 @@ categories = ["api-bindings", "development-tools"]
 
 [features]
 default = []
-# Future: KQL validation via .NET AOT FFI
-kql-validation = []
 
 [dependencies]
 # Azure SDK
@@ -47,6 +45,9 @@ uuid.workspace = true
 # Templating & extraction
 tera.workspace = true
 jsonpath_lib.workspace = true
+
+# KQL validation via FFI (Kusto.Language)
+kql-language-ffi = { path = "../kql-language-ffi" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

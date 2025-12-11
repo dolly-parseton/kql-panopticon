@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/kql-panopticon-core"]
+members = ["crates/kql-panopticon-core", "crates/kql-language-ffi"]
 resolver = "2"
 
 [workspace.package]
@@ -56,8 +56,13 @@ env_logger = "0.11"
 # Shell/REPL
 clap-repl = "0.3"
 
+# FFI utilities
+libloading = "0.8"
+once_cell = "1.19"
+
 # Internal
 kql-panopticon-core = { path = "crates/kql-panopticon-core" }
+kql-language-ffi = { path = "crates/kql-language-ffi" }
 
 [package]
 name = "kql-panopticon"
