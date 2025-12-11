@@ -7,6 +7,23 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Patch runtimeconfig.json to allow major version rollforward
+# This enables running on newer .NET versions (e.g., .NET 9 when targeting .NET 8)
+patch_runtime_config() {
+    local config_file="$1"
+    if [ -f "$config_file" ]; then
+        # Use sed to change rollForward from "LatestMinor" to "Major"
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            # macOS sed requires empty string for in-place backup
+            sed -i '' 's/"rollForward"[[:space:]]*:[[:space:]]*"[^"]*"/"rollForward": "Major"/g' "$config_file"
+        else
+            # GNU sed
+            sed -i 's/"rollForward"[[:space:]]*:[[:space:]]*"[^"]*"/"rollForward": "Major"/g' "$config_file"
+        fi
+        echo "Patched runtime config: $config_file (rollForward: Major)"
+    fi
+}
+
 # Default to current platform if no argument provided
 if [ -z "$1" ]; then
     # Detect current platform
@@ -89,6 +106,9 @@ for rid in "${RIDS[@]}"; do
                 fi
                 ;;
         esac
+
+        # Patch runtime config for major version rollforward
+        patch_runtime_config "native/$rid/KqlLanguageFfi.runtimeconfig.json"
 
         echo "Success: native/$rid/"
     else

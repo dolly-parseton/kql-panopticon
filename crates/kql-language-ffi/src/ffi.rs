@@ -127,18 +127,6 @@ pub mod symbols {
 
     /// Get classifications function symbol
     pub const KQL_GET_CLASSIFICATIONS: &str = "kql_get_classifications";
-
-    /// All required symbols for Phase 1 (validation)
-    pub const REQUIRED_PHASE1: &[&str] = &[KQL_INIT, KQL_CLEANUP, KQL_VALIDATE_SYNTAX, KQL_GET_LAST_ERROR];
-
-    /// Additional symbols for schema validation
-    pub const SCHEMA_VALIDATION: &[&str] = &[KQL_VALIDATE_WITH_SCHEMA];
-
-    /// Additional symbols for completion (Phase 2)
-    pub const COMPLETION: &[&str] = &[KQL_GET_COMPLETIONS];
-
-    /// Additional symbols for classification (Phase 3)
-    pub const CLASSIFICATION: &[&str] = &[KQL_GET_CLASSIFICATIONS];
 }
 
 /// Return codes from FFI functions
@@ -147,12 +135,6 @@ pub mod return_codes {
 
     /// Buffer too small - need to retry with larger buffer
     pub const BUFFER_TOO_SMALL: c_int = -1;
-
-    /// Parse error in input
-    pub const PARSE_ERROR: c_int = -2;
-
-    /// Internal error
-    pub const INTERNAL_ERROR: c_int = -3;
 
     /// Check if return code indicates success
     pub fn is_success(code: c_int) -> bool {

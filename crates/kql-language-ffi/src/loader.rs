@@ -147,7 +147,8 @@ pub struct LoadedLibrary {
     /// Initialize function
     pub init: KqlInitFn,
 
-    /// Cleanup function
+    /// Cleanup function (for future use)
+    #[allow(dead_code)]
     pub cleanup: KqlCleanupFn,
 
     /// Validate syntax function
@@ -270,9 +271,104 @@ impl LoadedLibrary {
     }
 }
 
+/// Ensure DOTNET_ROOT is set for the .NET runtime
+///
+/// DNNE-based libraries require the .NET runtime, which needs DOTNET_ROOT
+/// to be set on some systems (especially macOS with Homebrew).
+fn ensure_dotnet_root() {
+    // Skip if already set
+    if std::env::var("DOTNET_ROOT").is_ok() {
+        return;
+    }
+
+    // Try to find dotnet and derive DOTNET_ROOT
+    if let Some(dotnet_root) = find_dotnet_root() {
+        log::debug!("Auto-detected DOTNET_ROOT: {:?}", dotnet_root);
+        std::env::set_var("DOTNET_ROOT", &dotnet_root);
+    }
+}
+
+/// Try to find the .NET runtime root directory
+fn find_dotnet_root() -> Option<PathBuf> {
+    // Common locations to check
+    let candidates = [
+        // Homebrew on Apple Silicon
+        "/opt/homebrew/Cellar/dotnet",
+        // Homebrew on Intel Mac
+        "/usr/local/Cellar/dotnet",
+        // Standard Linux/macOS locations
+        "/usr/share/dotnet",
+        "/usr/local/share/dotnet",
+        // Windows default
+        "C:\\Program Files\\dotnet",
+    ];
+
+    // First, try to find via `dotnet --info` output
+    if let Ok(output) = std::process::Command::new("dotnet")
+        .args(["--info"])
+        .output()
+    {
+        if output.status.success() {
+            let info = String::from_utf8_lossy(&output.stdout);
+            // Look for "Base Path:" line which contains the SDK path
+            // e.g., "Base Path:   /opt/homebrew/Cellar/dotnet/9.0.8/libexec/sdk/9.0.109/"
+            for line in info.lines() {
+                if line.trim().starts_with("Base Path:") {
+                    if let Some(path_str) = line.split(':').nth(1) {
+                        let path = PathBuf::from(path_str.trim());
+                        // Navigate up to find libexec (the actual runtime root)
+                        // Path is like: .../libexec/sdk/X.Y.Z/ -> we want .../libexec
+                        if let Some(libexec) = path.ancestors().find(|p| p.ends_with("libexec")) {
+                            return Some(libexec.to_path_buf());
+                        }
+                        // Or try to find the dotnet root another way
+                        if let Some(dotnet_dir) = path.ancestors().find(|p| {
+                            p.join("dotnet").exists() || p.join("shared").exists()
+                        }) {
+                            return Some(dotnet_dir.to_path_buf());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back to checking known locations
+    for candidate in candidates {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            // For Homebrew, we need to find the version directory with libexec
+            if candidate.contains("Cellar") {
+                if let Ok(entries) = std::fs::read_dir(&path) {
+                    // Find the latest version directory
+                    let mut versions: Vec<_> = entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.path().is_dir())
+                        .collect();
+                    versions.sort_by_key(|b| std::cmp::Reverse(b.path()));
+
+                    if let Some(version_dir) = versions.first() {
+                        let libexec = version_dir.path().join("libexec");
+                        if libexec.exists() {
+                            return Some(libexec);
+                        }
+                    }
+                }
+            } else if path.join("shared").exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
 /// Load the library (or get cached instance)
 pub fn load_library() -> Result<&'static LoadedLibrary, Error> {
     LIBRARY.get_or_try_init(|| {
+        // Ensure DOTNET_ROOT is set for DNNE libraries
+        ensure_dotnet_root();
+
         let path = find_library_path().ok_or_else(|| Error::LibraryNotFound {
             searched_paths: searched_paths(),
         })?;
@@ -299,6 +395,7 @@ pub fn load_library() -> Result<&'static LoadedLibrary, Error> {
 }
 
 /// Check if the library is loaded
+#[allow(dead_code)]
 pub fn is_loaded() -> bool {
     LIBRARY.get().is_some()
 }

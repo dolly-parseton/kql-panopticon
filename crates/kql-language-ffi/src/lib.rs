@@ -13,18 +13,21 @@
 //!
 //! ## Usage
 //!
-//! ```rust,ignore
+//! ```no_run
 //! use kql_language_ffi::{KqlValidator, ValidationResult};
 //!
-//! let validator = KqlValidator::new()?;
-//! let result = validator.validate_syntax("SecurityEvent | take 10")?;
+//! fn main() -> Result<(), kql_language_ffi::Error> {
+//!     let validator = KqlValidator::new()?;
+//!     let result = validator.validate_syntax("SecurityEvent | take 10")?;
 //!
-//! if result.is_valid() {
-//!     println!("Query is valid!");
-//! } else {
-//!     for diagnostic in result.diagnostics() {
-//!         println!("Error at {}:{}: {}", diagnostic.line, diagnostic.column, diagnostic.message);
+//!     if result.is_valid() {
+//!         println!("Query is valid!");
+//!     } else {
+//!         for diagnostic in result.diagnostics() {
+//!             println!("Error at {}:{}: {}", diagnostic.line, diagnostic.column, diagnostic.message);
+//!         }
 //!     }
+//!     Ok(())
 //! }
 //! ```
 //!
@@ -37,6 +40,8 @@
 //! 2. Downloaded from releases (if using `bundled` feature)
 //! 3. Specified via `KQL_LANGUAGE_FFI_PATH` environment variable
 
+mod classification;
+mod completion;
 mod error;
 mod ffi;
 mod loader;
@@ -44,6 +49,8 @@ mod schema;
 mod types;
 mod validator;
 
+pub use classification::{ClassificationKind, ClassificationResult, ClassifiedSpan};
+pub use completion::{CompletionItem, CompletionKind, CompletionResult};
 pub use error::Error;
 pub use schema::{Column, Function, Schema, Table};
 pub use types::{Diagnostic, DiagnosticSeverity, ValidationResult};

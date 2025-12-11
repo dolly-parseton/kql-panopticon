@@ -2,7 +2,7 @@
 //!
 //! This module provides the high-level API for validating KQL queries.
 
-use crate::error::{Error, FfiErrorCode};
+use crate::error::Error;
 use crate::ffi::{return_codes, DEFAULT_BUFFER_SIZE, MAX_BUFFER_SIZE};
 use crate::loader::{self, LoadedLibrary};
 use crate::schema::Schema;
@@ -17,24 +17,27 @@ use std::ffi::c_int;
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use kql_language_ffi::KqlValidator;
+/// ```no_run
+/// use kql_language_ffi::{KqlValidator, Schema, Table};
 ///
-/// let validator = KqlValidator::new()?;
+/// fn main() -> Result<(), kql_language_ffi::Error> {
+///     let validator = KqlValidator::new()?;
 ///
-/// // Syntax-only validation
-/// let result = validator.validate_syntax("SecurityEvent | take 10")?;
-/// assert!(result.is_valid());
+///     // Syntax-only validation
+///     let result = validator.validate_syntax("SecurityEvent | take 10")?;
+///     assert!(result.is_valid());
 ///
-/// // With schema
-/// let schema = Schema::new()
-///     .table(Table::new("SecurityEvent")
-///         .with_column("TimeGenerated", "datetime")
-///         .with_column("Account", "string"));
-/// let result = validator.validate_with_schema(
-///     "SecurityEvent | project TimeGenerated, Account",
-///     &schema
-/// )?;
+///     // With schema
+///     let schema = Schema::new()
+///         .table(Table::new("SecurityEvent")
+///             .with_column("TimeGenerated", "datetime")
+///             .with_column("Account", "string"));
+///     let result = validator.validate_with_schema(
+///         "SecurityEvent | project TimeGenerated, Account",
+///         &schema
+///     )?;
+///     Ok(())
+/// }
 /// ```
 pub struct KqlValidator {
     lib: &'static LoadedLibrary,
@@ -138,6 +141,88 @@ impl KqlValidator {
         self.lib.supports_classification()
     }
 
+    /// Get syntax classifications for a KQL query (for syntax highlighting)
+    ///
+    /// Returns a list of classified spans that can be used to highlight
+    /// different parts of the query (keywords, operators, identifiers, etc.)
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The KQL query string to classify
+    ///
+    /// # Returns
+    ///
+    /// A `ClassificationResult` containing spans with their classification kinds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if classification is not supported by the loaded library.
+    pub fn get_classifications(&self, query: &str) -> Result<crate::classification::ClassificationResult, Error> {
+        let classify_fn = self.lib.get_classifications.ok_or_else(|| Error::Internal {
+            message: "Classification not supported by loaded library".to_string(),
+        })?;
+
+        let query_bytes = query.as_bytes();
+
+        self.call_ffi_json(|buffer| unsafe {
+            classify_fn(
+                query_bytes.as_ptr(),
+                query_bytes.len() as c_int,
+                buffer.as_mut_ptr(),
+                buffer.len() as c_int,
+            )
+        })
+    }
+
+    /// Get completion suggestions at a cursor position
+    ///
+    /// Returns completion items (keywords, functions, tables, columns, etc.)
+    /// that are valid at the given cursor position.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The KQL query string
+    /// * `cursor_position` - Cursor position (0-based character offset)
+    /// * `schema` - Optional schema for context-aware completions
+    ///
+    /// # Returns
+    ///
+    /// A `CompletionResult` containing completion items.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if completion is not supported by the loaded library.
+    pub fn get_completions(
+        &self,
+        query: &str,
+        cursor_position: usize,
+        schema: Option<&Schema>,
+    ) -> Result<crate::completion::CompletionResult, Error> {
+        let completions_fn = self.lib.get_completions.ok_or_else(|| Error::Internal {
+            message: "Completion not supported by loaded library".to_string(),
+        })?;
+
+        let query_bytes = query.as_bytes();
+        let schema_json = schema.map(serde_json::to_string).transpose()?;
+
+        self.call_ffi_json(|buffer| unsafe {
+            let (schema_ptr, schema_len) = match &schema_json {
+                Some(json) => (json.as_ptr(), json.len() as c_int),
+                None => (std::ptr::null(), 0),
+            };
+
+            completions_fn(
+                query_bytes.as_ptr(),
+                query_bytes.len() as c_int,
+                cursor_position as c_int,
+                schema_ptr,
+                schema_len,
+                buffer.as_mut_ptr(),
+                buffer.len() as c_int,
+            )
+        })
+    }
+
     /// Call an FFI function with automatic buffer retry on overflow
     fn call_ffi_with_retry<F>(&self, mut ffi_call: F) -> Result<ValidationResult, Error>
     where
@@ -189,12 +274,61 @@ impl KqlValidator {
         Ok(validation_result)
     }
 
+    /// Call an FFI function and deserialize JSON result to a generic type
+    fn call_ffi_json<T, F>(&self, mut ffi_call: F) -> Result<T, Error>
+    where
+        T: for<'de> serde::Deserialize<'de> + Default,
+        F: FnMut(&mut Vec<u8>) -> c_int,
+    {
+        let mut buffer = vec![0u8; DEFAULT_BUFFER_SIZE];
+        let mut result = ffi_call(&mut buffer);
+
+        // Handle buffer too small - retry with larger buffer
+        if return_codes::is_buffer_too_small(result) {
+            let new_size = buffer.len() * 2;
+            if new_size > MAX_BUFFER_SIZE {
+                return Err(Error::BufferTooSmall {
+                    needed: new_size,
+                    available: MAX_BUFFER_SIZE,
+                });
+            }
+            buffer.resize(new_size, 0);
+            result = ffi_call(&mut buffer);
+
+            if return_codes::is_buffer_too_small(result) {
+                return Err(Error::BufferTooSmall {
+                    needed: 0,
+                    available: buffer.len(),
+                });
+            }
+        }
+
+        // Check for errors
+        if !return_codes::is_success(result) {
+            let error_msg = self.get_last_error().unwrap_or_default();
+            return Err(Error::from_ffi_code(result, &error_msg));
+        }
+
+        // Parse JSON result
+        if result == 0 {
+            return Ok(T::default());
+        }
+
+        let json_len = result as usize;
+        let json_str = std::str::from_utf8(&buffer[..json_len])?;
+
+        log::trace!("FFI returned JSON: {}", json_str);
+
+        let parsed_result: T = serde_json::from_str(json_str)?;
+        Ok(parsed_result)
+    }
+
     /// Get the last error message from the native library
     fn get_last_error(&self) -> Option<String> {
         let mut buffer = vec![0u8; 1024];
         let result = unsafe { (self.lib.get_last_error)(buffer.as_mut_ptr(), buffer.len() as c_int) };
 
-        if FfiErrorCode::is_success(result) && result > 0 {
+        if return_codes::is_success(result) && result > 0 {
             let len = result as usize;
             String::from_utf8(buffer[..len].to_vec()).ok()
         } else {
@@ -263,5 +397,93 @@ mod tests {
             .validate_with_schema("SecurityEvent | project UnknownColumn", &schema)
             .expect("Validation failed");
         assert!(!result.is_valid());
+    }
+
+    #[test]
+    #[ignore]
+    fn test_get_classifications() {
+        let validator = KqlValidator::new().expect("Failed to create validator");
+        let result = validator
+            .get_classifications("SecurityEvent | where TimeGenerated > ago(1h) | take 10")
+            .expect("Classification failed");
+
+        // Should have some spans
+        assert!(!result.spans.is_empty(), "Expected classification spans");
+
+        // Print spans for debugging
+        for span in &result.spans {
+            println!(
+                "Span: start={}, length={}, kind={:?}",
+                span.start, span.length, span.kind
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn test_get_completions_after_pipe() {
+        let validator = KqlValidator::new().expect("Failed to create validator");
+
+        // Get completions after the pipe operator
+        let query = "SecurityEvent | ";
+        let cursor_pos = query.len(); // cursor at end
+
+        let result = validator
+            .get_completions(query, cursor_pos, None)
+            .expect("Completion failed");
+
+        // Should have completion items (operators like where, project, etc.)
+        assert!(!result.items.is_empty(), "Expected completion items");
+
+        // Print items for debugging
+        println!("Completions at position {} in '{}':", cursor_pos, query);
+        for item in &result.items {
+            println!(
+                "  {} ({:?}) - edit_start: {}",
+                item.label, item.kind, item.edit_start
+            );
+        }
+
+        // Should include common operators
+        let labels: Vec<_> = result.items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("where") || l.contains("project")),
+            "Expected 'where' or 'project' in completions"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_get_completions_with_schema() {
+        let validator = KqlValidator::new().expect("Failed to create validator");
+
+        let schema = Schema::new().table(
+            crate::schema::Table::new("SecurityEvent")
+                .with_column("TimeGenerated", "datetime")
+                .with_column("Account", "string")
+                .with_column("Computer", "string"),
+        );
+
+        // Get completions after 'project ' - should include column names
+        let query = "SecurityEvent | project ";
+        let cursor_pos = query.len();
+
+        let result = validator
+            .get_completions(query, cursor_pos, Some(&schema))
+            .expect("Completion failed");
+
+        assert!(!result.items.is_empty(), "Expected completion items");
+
+        // Print items for debugging
+        println!(
+            "Completions with schema at position {} in '{}':",
+            cursor_pos, query
+        );
+        for item in &result.items {
+            println!(
+                "  {} ({:?}) - detail: {:?}",
+                item.label, item.kind, item.detail
+            );
+        }
     }
 }

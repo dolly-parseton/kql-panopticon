@@ -123,6 +123,78 @@ public static class NativeExports
     }
 
     /// <summary>
+    /// Get syntax classifications for a KQL query (for highlighting).
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "kql_get_classifications")]
+    public static unsafe int GetClassifications(
+        byte* queryPtr,
+        int queryLen,
+        byte* outputPtr,
+        int outputMaxLen)
+    {
+        try
+        {
+            // Convert input bytes to string
+            var query = Encoding.UTF8.GetString(queryPtr, queryLen);
+
+            // Get classifications
+            var result = ClassificationService.GetClassifications(query);
+
+            // Serialize result to JSON
+            return WriteJsonResult(result, outputPtr, outputMaxLen);
+        }
+        catch (Exception ex)
+        {
+            _lastError = $"GetClassifications failed: {ex}";
+            return ErrorInternal;
+        }
+    }
+
+    /// <summary>
+    /// Get completion items at cursor position.
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "kql_get_completions")]
+    public static unsafe int GetCompletions(
+        byte* queryPtr,
+        int queryLen,
+        int cursorPosition,
+        byte* schemaPtr,
+        int schemaLen,
+        byte* outputPtr,
+        int outputMaxLen)
+    {
+        try
+        {
+            // Convert input bytes to string
+            var query = Encoding.UTF8.GetString(queryPtr, queryLen);
+
+            // Parse schema if provided
+            SchemaDefinition? schema = null;
+            if (schemaPtr != null && schemaLen > 0)
+            {
+                var schemaJson = Encoding.UTF8.GetString(schemaPtr, schemaLen);
+                schema = JsonSerializer.Deserialize<SchemaDefinition>(schemaJson);
+            }
+
+            // Get completions
+            var result = CompletionService.GetCompletions(query, cursorPosition, schema);
+
+            // Serialize result to JSON
+            return WriteJsonResult(result, outputPtr, outputMaxLen);
+        }
+        catch (JsonException ex)
+        {
+            _lastError = $"Schema JSON parse error: {ex.Message}";
+            return ErrorParseError;
+        }
+        catch (Exception ex)
+        {
+            _lastError = $"GetCompletions failed: {ex}";
+            return ErrorInternal;
+        }
+    }
+
+    /// <summary>
     /// Get the last error message.
     /// </summary>
     [UnmanagedCallersOnly(EntryPoint = "kql_get_last_error")]
@@ -151,9 +223,9 @@ public static class NativeExports
     }
 
     /// <summary>
-    /// Write a validation result as JSON to the output buffer.
+    /// Write a result object as JSON to the output buffer.
     /// </summary>
-    private static unsafe int WriteJsonResult(ValidationResult result, byte* outputPtr, int outputMaxLen)
+    private static unsafe int WriteJsonResult<T>(T result, byte* outputPtr, int outputMaxLen)
     {
         var json = JsonSerializer.Serialize(result, JsonOptions.Default);
         var bytes = Encoding.UTF8.GetBytes(json);

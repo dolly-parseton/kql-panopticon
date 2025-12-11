@@ -1,4 +1,4 @@
-//! Shared types for KQL Language FFI
+//! Validation types for KQL Language FFI
 
 use serde::{Deserialize, Serialize};
 
@@ -119,8 +119,9 @@ pub enum DiagnosticSeverity {
 }
 
 impl DiagnosticSeverity {
-    /// Convert from a string (case-insensitive)
-    pub fn from_str(s: &str) -> Self {
+    /// Parse from a string (case-insensitive)
+    #[allow(dead_code)]
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "error" => Self::Error,
             "warning" => Self::Warning,
@@ -142,170 +143,3 @@ impl std::fmt::Display for DiagnosticSeverity {
     }
 }
 
-/// Classification kind for syntax highlighting
-///
-/// These values match the `ClassificationKind` enum from Kusto.Language
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub enum ClassificationKind {
-    /// Plain text (no special highlighting)
-    PlainText,
-    /// A comment
-    Comment,
-    /// Punctuation characters: (), ;:
-    Punctuation,
-    /// A directive: #
-    Directive,
-    /// A non-string literal (number, boolean, etc.)
-    Literal,
-    /// A string literal
-    StringLiteral,
-    /// A type name
-    Type,
-    /// An identifier
-    Identifier,
-    /// A column name
-    Column,
-    /// A table name
-    Table,
-    /// A database name
-    Database,
-    /// A scalar function
-    ScalarFunction,
-    /// An aggregate function
-    AggregateFunction,
-    /// A keyword
-    Keyword,
-    /// An operator
-    Operator,
-    /// A variable
-    Variable,
-    /// A parameter
-    Parameter,
-    /// A command keyword
-    CommandKeyword,
-    /// A query operator (pipe operators like where, project, etc.)
-    QueryOperator,
-    /// A scalar operator (mathematical/logical operators)
-    ScalarOperator,
-    /// A materializable expression
-    MaterializedViewFunction,
-    /// Plugin name
-    Plugin,
-    /// Option name
-    Option,
-    /// Client directive
-    ClientDirective,
-    /// Query parameter
-    QueryParameter,
-    /// Cluster name
-    Cluster,
-}
-
-impl ClassificationKind {
-    /// Convert from a string
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "PlainText" => Self::PlainText,
-            "Comment" => Self::Comment,
-            "Punctuation" => Self::Punctuation,
-            "Directive" => Self::Directive,
-            "Literal" => Self::Literal,
-            "StringLiteral" => Self::StringLiteral,
-            "Type" => Self::Type,
-            "Identifier" => Self::Identifier,
-            "Column" => Self::Column,
-            "Table" => Self::Table,
-            "Database" => Self::Database,
-            "ScalarFunction" => Self::ScalarFunction,
-            "AggregateFunction" => Self::AggregateFunction,
-            "Keyword" => Self::Keyword,
-            "Operator" => Self::Operator,
-            "Variable" => Self::Variable,
-            "Parameter" => Self::Parameter,
-            "CommandKeyword" => Self::CommandKeyword,
-            "QueryOperator" => Self::QueryOperator,
-            "ScalarOperator" => Self::ScalarOperator,
-            "MaterializedViewFunction" => Self::MaterializedViewFunction,
-            "Plugin" => Self::Plugin,
-            "Option" => Self::Option,
-            "ClientDirective" => Self::ClientDirective,
-            "QueryParameter" => Self::QueryParameter,
-            "Cluster" => Self::Cluster,
-            _ => Self::PlainText,
-        }
-    }
-}
-
-/// A classified span for syntax highlighting
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClassifiedSpan {
-    /// Start offset (0-based)
-    pub start: usize,
-    /// Length of the span
-    pub length: usize,
-    /// Classification kind
-    pub kind: ClassificationKind,
-}
-
-/// Result of syntax classification
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClassificationResult {
-    /// Classified spans
-    pub spans: Vec<ClassifiedSpan>,
-}
-
-/// A completion item
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompletionItem {
-    /// Display label
-    pub label: String,
-    /// Kind of completion
-    pub kind: CompletionKind,
-    /// Optional detail text
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    /// Text to insert (if different from label)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub insert_text: Option<String>,
-    /// Sort order (lower = higher priority)
-    #[serde(default)]
-    pub sort_order: i32,
-}
-
-/// Kind of completion item
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub enum CompletionKind {
-    /// A keyword
-    Keyword,
-    /// A function
-    Function,
-    /// An aggregate function
-    AggregateFunction,
-    /// A table
-    Table,
-    /// A column
-    Column,
-    /// A variable
-    Variable,
-    /// An operator
-    Operator,
-    /// A parameter
-    Parameter,
-    /// A database
-    Database,
-    /// A cluster
-    Cluster,
-    /// A type
-    Type,
-    /// Other/unknown
-    Other,
-}
-
-/// Result of completion request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompletionResult {
-    /// Completion items
-    pub items: Vec<CompletionItem>,
-}

@@ -93,7 +93,7 @@ public static class ValidationService
     /// <summary>
     /// Build a GlobalState from a schema definition.
     /// </summary>
-    private static GlobalState BuildGlobalState(SchemaDefinition schema)
+    public static GlobalState BuildGlobalState(SchemaDefinition schema)
     {
         var tableSymbols = new List<TableSymbol>();
 

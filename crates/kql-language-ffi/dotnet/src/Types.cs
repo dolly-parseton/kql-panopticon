@@ -207,3 +207,103 @@ public class ParameterDefinition
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? DefaultValue { get; set; }
 }
+
+// ============================================================================
+// Classification Types (Phase 2)
+// ============================================================================
+
+/// <summary>
+/// Result of syntax classification for highlighting.
+/// </summary>
+public class ClassificationResult
+{
+    /// <summary>
+    /// List of classified spans.
+    /// </summary>
+    [JsonPropertyName("spans")]
+    public List<ClassifiedSpan> Spans { get; set; } = new();
+}
+
+/// <summary>
+/// A classified span with a kind for syntax highlighting.
+/// </summary>
+public class ClassifiedSpan
+{
+    /// <summary>
+    /// Start offset (0-based character position).
+    /// </summary>
+    [JsonPropertyName("start")]
+    public int Start { get; set; }
+
+    /// <summary>
+    /// Length of the span.
+    /// </summary>
+    [JsonPropertyName("length")]
+    public int Length { get; set; }
+
+    /// <summary>
+    /// Classification kind (matches Kusto.Language.ClassificationKind).
+    /// </summary>
+    [JsonPropertyName("kind")]
+    public string Kind { get; set; } = "PlainText";
+}
+
+// ============================================================================
+// Completion Types (Phase 2)
+// ============================================================================
+
+/// <summary>
+/// Result of completion request.
+/// </summary>
+public class CompletionResult
+{
+    /// <summary>
+    /// List of completion items.
+    /// </summary>
+    [JsonPropertyName("items")]
+    public List<CompletionItemResponse> Items { get; set; } = new();
+}
+
+/// <summary>
+/// A completion item for intellisense.
+/// </summary>
+public class CompletionItemResponse
+{
+    /// <summary>
+    /// Display label for the completion.
+    /// </summary>
+    [JsonPropertyName("label")]
+    public string Label { get; set; } = "";
+
+    /// <summary>
+    /// Kind of completion (Keyword, Function, Table, Column, etc.).
+    /// </summary>
+    [JsonPropertyName("kind")]
+    public string Kind { get; set; } = "Other";
+
+    /// <summary>
+    /// Text to insert (if different from label).
+    /// </summary>
+    [JsonPropertyName("insert_text")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? InsertText { get; set; }
+
+    /// <summary>
+    /// Brief description or signature.
+    /// </summary>
+    [JsonPropertyName("detail")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Detail { get; set; }
+
+    /// <summary>
+    /// Sort order (lower = higher priority).
+    /// </summary>
+    [JsonPropertyName("sort_order")]
+    public int SortOrder { get; set; }
+
+    /// <summary>
+    /// Character position where replacement should start.
+    /// </summary>
+    [JsonPropertyName("edit_start")]
+    public int EditStart { get; set; }
+}

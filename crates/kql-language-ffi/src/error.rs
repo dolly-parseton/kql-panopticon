@@ -70,35 +70,3 @@ impl Error {
         }
     }
 }
-
-/// FFI error codes returned by the native library
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum FfiErrorCode {
-    /// Success (or positive value indicating output length)
-    Success = 0,
-    /// Output buffer too small
-    BufferTooSmall = -1,
-    /// Parse error in input
-    ParseError = -2,
-    /// Internal error
-    InternalError = -3,
-}
-
-impl FfiErrorCode {
-    /// Check if a return code indicates success
-    pub fn is_success(code: i32) -> bool {
-        code >= 0
-    }
-
-    /// Convert a return code to an error code
-    pub fn from_code(code: i32) -> Option<Self> {
-        match code {
-            -1 => Some(Self::BufferTooSmall),
-            -2 => Some(Self::ParseError),
-            -3 => Some(Self::InternalError),
-            _ if code >= 0 => Some(Self::Success),
-            _ => None,
-        }
-    }
-}
