@@ -80,6 +80,10 @@ pub enum Error {
     #[error("Timeout: {message}")]
     Timeout { message: String },
 
+    /// Execution errors (executor-level, not step-specific)
+    #[error("Execution error: {message}")]
+    Execution { message: String },
+
     /// Generic/wrapped errors
     #[error("{0}")]
     Other(String),
@@ -175,6 +179,13 @@ impl Error {
     /// Create a timeout error
     pub fn timeout(message: impl Into<String>) -> Self {
         Self::Timeout {
+            message: message.into(),
+        }
+    }
+
+    /// Create an execution error (executor-level)
+    pub fn execution(message: impl Into<String>) -> Self {
+        Self::Execution {
             message: message.into(),
         }
     }

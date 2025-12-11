@@ -107,6 +107,10 @@ pub struct Step {
     #[serde(default)]
     pub response: Option<HttpResponse>,
 
+    /// File source configuration (for File steps)
+    #[serde(default)]
+    pub source: Option<FileSource>,
+
     /// Rate limiting for HTTP steps
     #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
@@ -167,6 +171,7 @@ pub enum StepType {
     #[default]
     Kql,
     Http,
+    File,
 }
 
 /// HTTP request configuration
@@ -221,6 +226,42 @@ pub struct HttpResponse {
     /// Field mappings (column_name -> JSONPath)
     #[serde(default)]
     pub fields: HashMap<String, String>,
+}
+
+/// File source configuration (for File steps)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileSource {
+    /// File path (supports variable substitution)
+    pub path: String,
+
+    /// File format (auto-detected from extension if not specified)
+    #[serde(default)]
+    pub format: Option<FileFormat>,
+
+    /// CSV-specific options
+    #[serde(default)]
+    pub csv: Option<CsvOptions>,
+}
+
+/// File format
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileFormat {
+    Csv,
+    Json,
+    Yaml,
+}
+
+/// CSV parsing options
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CsvOptions {
+    /// Delimiter character (default: comma)
+    #[serde(default)]
+    pub delimiter: Option<char>,
+
+    /// Whether file has header row (default: true)
+    #[serde(default)]
+    pub has_header: Option<bool>,
 }
 
 /// Rate limiting configuration
@@ -555,6 +596,12 @@ impl Pack {
                             step.name
                         )));
                     }
+                    if step.source.is_some() {
+                        return Err(Error::pack(format!(
+                            "KQL step '{}' should not have 'source'",
+                            step.name
+                        )));
+                    }
                 }
                 StepType::Http => {
                     if step.request.is_none() {
@@ -572,6 +619,40 @@ impl Pack {
                     if step.query.as_ref().map_or(false, |q| !q.is_empty()) {
                         return Err(Error::pack(format!(
                             "HTTP step '{}' should not have 'query'",
+                            step.name
+                        )));
+                    }
+                    if step.source.is_some() {
+                        return Err(Error::pack(format!(
+                            "HTTP step '{}' should not have 'source'",
+                            step.name
+                        )));
+                    }
+                }
+                StepType::File => {
+                    if step.source.is_none() {
+                        return Err(Error::pack(format!(
+                            "File step '{}' must have 'source'",
+                            step.name
+                        )));
+                    }
+                    if let Some(source) = &step.source {
+                        if source.path.trim().is_empty() {
+                            return Err(Error::pack(format!(
+                                "File step '{}' has empty path",
+                                step.name
+                            )));
+                        }
+                    }
+                    if step.query.as_ref().map_or(false, |q| !q.is_empty()) {
+                        return Err(Error::pack(format!(
+                            "File step '{}' should not have 'query'",
+                            step.name
+                        )));
+                    }
+                    if step.request.is_some() {
+                        return Err(Error::pack(format!(
+                            "File step '{}' should not have 'request'",
                             step.name
                         )));
                     }

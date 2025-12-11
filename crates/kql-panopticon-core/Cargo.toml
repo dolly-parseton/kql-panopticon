@@ -36,6 +36,7 @@ thiserror.workspace = true
 
 # Utilities
 chrono.workspace = true
+csv.workspace = true
 regex.workspace = true
 walkdir.workspace = true
 dirs.workspace = true

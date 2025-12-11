@@ -17,6 +17,7 @@
 //! - [`execution`] - Pack execution engine
 //! - [`variable`] - Variable parsing and substitution
 //! - [`result`] - Result storage and formats
+//! - [`report`] - Report generation with templating
 //! - [`validation`] - KQL syntax validation (optional feature)
 //!
 //! ## Usage
@@ -64,12 +65,22 @@ pub use execution::{
     ProgressSender, ProgressUpdate,
 };
 
+// Re-export report types
+pub use report::{ReportGenerator, generate_report};
+
+// Re-export schema types
+pub use schema::{
+    SchemaRegistry, SchemaType, TableInfo, ColumnDef, WorkspaceSchema,
+};
+
 // Module declarations
 pub mod client;
 pub mod error;
 pub mod execution;
 pub mod pack;
+pub mod report;
 pub mod result;
+pub mod schema;
 pub mod variable;
 pub mod workspace;
 

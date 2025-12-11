@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/kql-panopticon-core", "crates/kql-language-ffi"]
+members = [
+    "crates/kql-panopticon-core",
+    "crates/kql-panopticon-repl",
+    "crates/kql-language-ffi",
+]
 resolver = "2"
 
 [workspace.package]
@@ -34,6 +38,7 @@ thiserror = "1.0"
 
 # Utilities
 chrono = "0.4"
+csv = "1.3"
 regex = "1"
 walkdir = "2"
 dirs = "5.0"
@@ -62,6 +67,7 @@ once_cell = "1.19"
 
 # Internal
 kql-panopticon-core = { path = "crates/kql-panopticon-core" }
+kql-panopticon-repl = { path = "crates/kql-panopticon-repl" }
 kql-language-ffi = { path = "crates/kql-language-ffi" }
 
 [package]

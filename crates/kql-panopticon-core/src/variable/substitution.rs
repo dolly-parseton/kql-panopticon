@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
 /// Context for variable substitution during execution
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SubstitutionContext {
     /// User-provided inputs
     pub inputs: HashMap<String, String>,

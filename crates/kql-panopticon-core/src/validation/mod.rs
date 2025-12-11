@@ -200,18 +200,22 @@ mod tests {
         let validator = KqlValidator::new().unwrap();
 
         let schema = Schema {
+            database: None,
             tables: vec![Table {
                 name: "SecurityEvent".to_string(),
                 columns: vec![
                     Column {
                         name: "TimeGenerated".to_string(),
                         data_type: "datetime".to_string(),
+                        description: None,
                     },
                     Column {
                         name: "Computer".to_string(),
                         data_type: "string".to_string(),
+                        description: None,
                     },
                 ],
+                description: None,
             }],
             functions: vec![],
         };

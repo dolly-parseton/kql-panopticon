@@ -1,21 +1,32 @@
 //! Pack executor for dependency-driven execution
 //!
 //! Executes pack steps in topological order based on dependencies.
-//! Steps with no dependencies can run concurrently (based on config).
+//! Steps with no dependencies can run when ready; steps with dependencies
+//! wait for their dependencies to complete.
 
-use crate::client::{Client, QueryResponse};
+use crate::client::Client;
 use crate::error::{Error, Result};
-use crate::pack::{Pack, Step, StepType};
+use crate::pack::{AggregateStrategy, ForeachClause, OnEmpty, OnError, Pack, Step, StepType};
+use crate::variable::{evaluate_condition, SubstitutionContext};
 use crate::workspace::Workspace;
+
 use super::engine::{ExecutionEngine, ExecutionOptions};
+use super::handlers::{FileHandler, HttpHandler, KqlHandler};
 use super::progress::{JobType, ProgressSender};
-use super::trace::ExecutionTrace;
+use super::step::{StepContext, StepHandler, StepOutput};
+use super::trace::{
+    ErrorCategory, ErrorTrace, ExecutionTrace, StepTrace, TraceStatus,
+    StepType as TraceStepType,
+};
+
 use async_trait::async_trait;
 use chrono::Local;
-use log::{debug, info};
+use log::{debug, info, warn};
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::fs;
 
 /// Configuration for pack execution
@@ -169,6 +180,9 @@ pub struct WorkspaceResult {
     /// Per-step results
     pub step_results: HashMap<String, StepResult>,
 
+    /// Step results as JSON rows (for substitution context)
+    pub step_data: HashMap<String, Vec<JsonValue>>,
+
     /// Total duration
     pub duration_ms: u64,
 
@@ -233,30 +247,52 @@ pub enum StepStatus {
     Skipped,
 }
 
-/// Pack executor
+/// Pack executor - coordinates step execution
 pub struct PackExecutor {
-    client: Client,
+    /// Registered step handlers
+    handlers: Vec<Box<dyn StepHandler>>,
+
+    /// Default timeout for steps
+    default_timeout: Duration,
+
+    /// Execution options
     options: ExecutionOptions,
 }
 
 impl PackExecutor {
-    /// Create a new executor
+    /// Create a new executor with the given client
     pub fn new(client: Client) -> Self {
+        let client = Arc::new(client);
         Self {
-            client,
+            handlers: vec![
+                Box::new(KqlHandler::new(client)),
+                Box::new(HttpHandler::new()),
+                Box::new(FileHandler::new()),
+            ],
+            default_timeout: Duration::from_secs(120),
             options: ExecutionOptions::default(),
         }
     }
 
-    /// Create with options
+    /// Create with custom options
     pub fn with_options(client: Client, options: ExecutionOptions) -> Self {
-        Self { client, options }
+        let mut executor = Self::new(client);
+        executor.options = options;
+        executor
     }
 
-    /// Set options
-    pub fn options(mut self, options: ExecutionOptions) -> Self {
-        self.options = options;
+    /// Set default timeout
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.default_timeout = timeout;
         self
+    }
+
+    /// Get handler for a step type
+    fn get_handler(&self, step_type: StepType) -> Option<&dyn StepHandler> {
+        self.handlers
+            .iter()
+            .find(|h| h.step_type() == step_type)
+            .map(|h| h.as_ref())
     }
 
     /// Execute steps for a single workspace
@@ -266,11 +302,38 @@ impl PackExecutor {
         workspace: &Workspace,
         config: &PackExecutorConfig,
         timestamp: &str,
+        progress: Option<&ProgressSender>,
     ) -> WorkspaceResult {
         let start = Instant::now();
         let mut step_results: HashMap<String, StepResult> = HashMap::new();
+        let mut step_data: HashMap<String, Vec<JsonValue>> = HashMap::new();
         let mut failed_step = None;
         let mut failure_reason = None;
+
+        // Build output directory
+        let output_dir = config
+            .output_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("./output"));
+
+        let workspace_output_dir = output_dir
+            .join(Workspace::normalize_name(&workspace.subscription_name))
+            .join(Workspace::normalize_name(&workspace.name))
+            .join(timestamp);
+
+        // Create output directory
+        if let Err(e) = fs::create_dir_all(&workspace_output_dir).await {
+            return WorkspaceResult {
+                workspace_name: workspace.name.clone(),
+                workspace_id: workspace.workspace_id.clone(),
+                status: ExecutionStatus::Failed,
+                step_results,
+                step_data,
+                duration_ms: start.elapsed().as_millis() as u64,
+                failed_step: None,
+                failure_reason: Some(format!("Failed to create output directory: {}", e)),
+            };
+        }
 
         // Get execution order
         let execution_order = match pack.execution_order() {
@@ -281,6 +344,7 @@ impl PackExecutor {
                     workspace_id: workspace.workspace_id.clone(),
                     status: ExecutionStatus::Failed,
                     step_results,
+                    step_data,
                     duration_ms: start.elapsed().as_millis() as u64,
                     failed_step: None,
                     failure_reason: Some(e.to_string()),
@@ -288,17 +352,29 @@ impl PackExecutor {
             }
         };
 
+        // Build initial substitution context with inputs
+        let mut substitution = SubstitutionContext::new();
+        for (key, value) in &config.inputs {
+            substitution.inputs.insert(key.clone(), value.clone());
+        }
+
         // Execute each step in order
         for step in execution_order {
             // Check if dependencies succeeded
-            let deps_ok = pack.get_all_dependencies(step).iter().all(|dep| {
+            let deps = pack.get_all_dependencies(step);
+            let deps_ok = deps.iter().all(|dep| {
                 step_results
                     .get(dep)
                     .map(|r| matches!(r.status, StepStatus::Success))
                     .unwrap_or(false)
             });
 
-            if !deps_ok && !pack.get_all_dependencies(step).is_empty() {
+            if !deps_ok && !deps.is_empty() {
+                // Emit skip event
+                if let Some(tx) = progress {
+                    tx.step_skipped(&step.name, &workspace.name, "Dependency failed");
+                }
+
                 step_results.insert(
                     step.name.clone(),
                     StepResult {
@@ -313,22 +389,163 @@ impl PackExecutor {
                 continue;
             }
 
-            // Execute the step
-            let step_result = self
-                .execute_step(step, workspace, config, timestamp)
-                .await;
+            // Check `when` condition if specified
+            if let Some(when_condition) = &step.when {
+                let condition_met = evaluate_condition(when_condition, &substitution.step_results);
 
-            if matches!(step_result.status, StepStatus::Failed) {
-                failed_step = Some(step.name.clone());
-                failure_reason = step_result.error.clone();
+                debug!(
+                    "Step '{}' when condition '{}' evaluated to: {}",
+                    step.name, when_condition, condition_met
+                );
+
+                if !condition_met {
+                    let reason = format!("Condition not met: {}", when_condition);
+
+                    // Emit skip event
+                    if let Some(tx) = progress {
+                        tx.step_skipped(&step.name, &workspace.name, &reason);
+                    }
+
+                    step_results.insert(
+                        step.name.clone(),
+                        StepResult {
+                            name: step.name.clone(),
+                            status: StepStatus::Skipped,
+                            row_count: None,
+                            duration_ms: 0,
+                            output_path: None,
+                            error: Some(reason),
+                        },
+                    );
+                    continue;
+                }
             }
 
-            step_results.insert(step.name.clone(), step_result);
+            // Emit step started event
+            if let Some(tx) = progress {
+                tx.step_started(&step.name, &workspace.name);
+            }
+
+            // Check if this is a foreach step
+            let result = if let Some(foreach_str) = &step.foreach {
+                self.execute_foreach_step(
+                    step,
+                    foreach_str,
+                    workspace,
+                    &substitution,
+                    &workspace_output_dir,
+                    progress,
+                )
+                .await
+            } else {
+                // Single execution
+                self.execute_step(step, workspace, &substitution, &workspace_output_dir)
+                    .await
+            };
+
+            match result {
+                Ok(output) => {
+                    let duration_ms = output.duration.as_millis() as u64;
+
+                    // Emit step completed event
+                    if let Some(tx) = progress {
+                        tx.step_completed(&step.name, &workspace.name, output.row_count, duration_ms);
+                    }
+
+                    // Add results to substitution context for downstream steps
+                    substitution
+                        .step_results
+                        .insert(step.name.clone(), output.rows.clone());
+                    step_data.insert(step.name.clone(), output.rows.clone());
+
+                    // Write results to file
+                    let output_path = workspace_output_dir.join(format!("{}.csv", step.name));
+                    if let Err(e) = write_csv_results(&output.rows, &output_path).await {
+                        warn!("Failed to write results for step '{}': {}", step.name, e);
+                    }
+
+                    step_results.insert(
+                        step.name.clone(),
+                        StepResult {
+                            name: step.name.clone(),
+                            status: StepStatus::Success,
+                            row_count: Some(output.row_count),
+                            duration_ms,
+                            output_path: Some(output_path),
+                            error: None,
+                        },
+                    );
+
+                    info!(
+                        "Step '{}' completed: {} rows",
+                        step.name, output.row_count
+                    );
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+
+                    // Handle on_error behavior
+                    let should_fail = match step.on_error.unwrap_or_default() {
+                        OnError::Fail => true,
+                        OnError::Skip | OnError::Continue => {
+                            info!("Step '{}' error ignored due to on_error setting: {}", step.name, error_msg);
+                            false
+                        }
+                    };
+
+                    if should_fail {
+                        // Emit step failed event
+                        if let Some(tx) = progress {
+                            tx.step_failed(&step.name, &workspace.name, &error_msg);
+                        }
+
+                        failed_step = Some(step.name.clone());
+                        failure_reason = Some(error_msg.clone());
+
+                        step_results.insert(
+                            step.name.clone(),
+                            StepResult {
+                                name: step.name.clone(),
+                                status: StepStatus::Failed,
+                                row_count: None,
+                                duration_ms: 0,
+                                output_path: None,
+                                error: Some(error_msg.clone()),
+                            },
+                        );
+
+                        warn!("Step '{}' failed: {}", step.name, error_msg);
+                    } else {
+                        // Record as skipped with empty results
+                        if let Some(tx) = progress {
+                            tx.step_skipped(&step.name, &workspace.name, format!("Error ignored: {}", error_msg));
+                        }
+
+                        substitution.step_results.insert(step.name.clone(), vec![]);
+                        step_data.insert(step.name.clone(), vec![]);
+
+                        step_results.insert(
+                            step.name.clone(),
+                            StepResult {
+                                name: step.name.clone(),
+                                status: StepStatus::Skipped,
+                                row_count: Some(0),
+                                duration_ms: 0,
+                                output_path: None,
+                                error: Some(format!("Error ignored: {}", error_msg)),
+                            },
+                        );
+                    }
+                }
+            }
         }
 
         // Determine overall status
         let status = if failed_step.is_some() {
-            if step_results.values().any(|r| matches!(r.status, StepStatus::Success)) {
+            if step_results
+                .values()
+                .any(|r| matches!(r.status, StepStatus::Success))
+            {
                 ExecutionStatus::Partial
             } else {
                 ExecutionStatus::Failed
@@ -342,196 +559,235 @@ impl PackExecutor {
             workspace_id: workspace.workspace_id.clone(),
             status,
             step_results,
+            step_data,
             duration_ms: start.elapsed().as_millis() as u64,
             failed_step,
             failure_reason,
         }
     }
 
-    /// Execute a single step
+    /// Execute a single step using the appropriate handler
     async fn execute_step(
         &self,
         step: &Step,
         workspace: &Workspace,
-        config: &PackExecutorConfig,
-        timestamp: &str,
-    ) -> StepResult {
-        let start = Instant::now();
+        substitution: &SubstitutionContext,
+        output_dir: &std::path::Path,
+    ) -> Result<StepOutput> {
+        let handler = self.get_handler(step.step_type).ok_or_else(|| {
+            Error::execution(format!("No handler for step type {:?}", step.step_type))
+        })?;
 
-        match step.step_type {
-            StepType::Kql => {
-                self.execute_kql_step(step, workspace, config, timestamp, start)
-                    .await
-            }
-            StepType::Http => {
-                // TODO: Implement HTTP step execution
-                StepResult {
-                    name: step.name.clone(),
-                    status: StepStatus::Failed,
-                    row_count: None,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_path: None,
-                    error: Some("HTTP steps not yet implemented".to_string()),
-                }
-            }
-        }
+        let ctx = StepContext {
+            substitution,
+            workspace: Some(workspace),
+            output_dir,
+            timeout: self.default_timeout,
+        };
+
+        debug!("Executing step '{}' (type: {:?})", step.name, step.step_type);
+        handler.execute(step, &ctx).await
     }
 
-    /// Execute a KQL step
-    async fn execute_kql_step(
+    /// Build execution trace from workspace results
+    fn build_trace(
+        &self,
+        pack: &Pack,
+        workspace_results: &HashMap<String, WorkspaceResult>,
+    ) -> ExecutionTrace {
+        let mut trace = ExecutionTrace::new();
+
+        // Add pack inputs to context
+        for input in &pack.inputs {
+            trace.set_context(
+                format!("input.{}", input.name),
+                serde_json::json!({
+                    "required": input.required,
+                    "default": input.default,
+                }),
+            );
+        }
+
+        // Build step map for quick lookup
+        let step_map: HashMap<&str, &Step> = pack.steps.iter().map(|s| (s.name.as_str(), s)).collect();
+
+        // Create step traces from results
+        for (workspace_id, ws_result) in workspace_results {
+            for (step_name, step_result) in &ws_result.step_results {
+                let step = step_map.get(step_name.as_str());
+                let step_type = step
+                    .map(|s| TraceStepType::from(s.step_type))
+                    .unwrap_or(TraceStepType::Kql);
+
+                let mut step_trace = StepTrace::new(step_name, step_type);
+                step_trace.workspace = Some(ws_result.workspace_name.clone());
+                step_trace.duration_ms = Some(step_result.duration_ms);
+                step_trace.rows = step_result.row_count;
+
+                // Set status based on step result
+                step_trace.status = match step_result.status {
+                    StepStatus::Success => TraceStatus::Success,
+                    StepStatus::Failed => TraceStatus::Failed,
+                    StepStatus::Skipped => TraceStatus::Skipped,
+                    StepStatus::Pending => TraceStatus::Pending,
+                    StepStatus::Running => TraceStatus::Running,
+                };
+
+                // Add error info if present
+                if let Some(error_msg) = &step_result.error {
+                    step_trace.error = Some(ErrorTrace::new(error_msg, ErrorCategory::Unknown));
+                }
+
+                trace.add_step(step_trace);
+            }
+        }
+
+        trace
+    }
+
+    /// Execute a step with foreach iteration
+    async fn execute_foreach_step(
         &self,
         step: &Step,
+        foreach_str: &str,
         workspace: &Workspace,
-        config: &PackExecutorConfig,
-        timestamp: &str,
-        start: Instant,
-    ) -> StepResult {
-        let query = match &step.query {
-            Some(q) => q.clone(),
-            None => {
-                return StepResult {
-                    name: step.name.clone(),
-                    status: StepStatus::Failed,
-                    row_count: None,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_path: None,
-                    error: Some("No query defined".to_string()),
-                };
-            }
-        };
+        substitution: &SubstitutionContext,
+        output_dir: &std::path::Path,
+        progress: Option<&ProgressSender>,
+    ) -> Result<StepOutput> {
+        let start = Instant::now();
 
-        // TODO: Variable substitution from inputs and previous step results
+        // Parse foreach clause: "source_step as alias"
+        let foreach_clause = ForeachClause::parse(foreach_str).ok_or_else(|| {
+            Error::pack(format!(
+                "Invalid foreach syntax '{}' in step '{}'. Expected: 'step_name as alias'",
+                foreach_str, step.name
+            ))
+        })?;
 
-        debug!(
-            "Executing step '{}' on workspace '{}'",
-            step.name, workspace.name
-        );
+        // Get source step results
+        let source_rows = substitution
+            .step_results
+            .get(&foreach_clause.source_step)
+            .cloned()
+            .unwrap_or_default();
 
-        // Build output path
-        let output_dir = config
-            .output_dir
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("./output"));
-
-        let normalized_subscription = Workspace::normalize_name(&workspace.subscription_name);
-        let normalized_workspace = Workspace::normalize_name(&workspace.name);
-
-        let step_output_dir = output_dir
-            .join(normalized_subscription)
-            .join(normalized_workspace)
-            .join(timestamp);
-
-        // Create directory
-        if let Err(e) = fs::create_dir_all(&step_output_dir).await {
-            return StepResult {
-                name: step.name.clone(),
-                status: StepStatus::Failed,
-                row_count: None,
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_path: None,
-                error: Some(format!("Failed to create output directory: {}", e)),
-            };
-        }
-
-        // Execute query
-        let timeout = self.client.query_timeout();
-        let query_future = self
-            .client
-            .query_workspace(&workspace.workspace_id, &query, step.timespan.as_deref());
-
-        let response = match tokio::time::timeout(timeout, query_future).await {
-            Ok(Ok(response)) => response,
-            Ok(Err(e)) => {
-                return StepResult {
-                    name: step.name.clone(),
-                    status: StepStatus::Failed,
-                    row_count: None,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_path: None,
-                    error: Some(e.to_string()),
-                };
-            }
-            Err(_) => {
-                return StepResult {
-                    name: step.name.clone(),
-                    status: StepStatus::Failed,
-                    row_count: None,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_path: None,
-                    error: Some(format!("Query timed out after {}s", timeout.as_secs())),
-                };
-            }
-        };
-
-        // Write results
-        let output_path = step_output_dir.join(format!("{}.csv", step.name));
-        match self
-            .write_csv_results(&response, &output_path, workspace, timestamp)
-            .await
-        {
-            Ok(row_count) => {
-                info!(
-                    "Step '{}' completed: {} rows -> {}",
-                    step.name,
-                    row_count,
-                    output_path.display()
-                );
-                StepResult {
-                    name: step.name.clone(),
-                    status: StepStatus::Success,
-                    row_count: Some(row_count),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_path: Some(output_path),
-                    error: None,
+        // Handle empty source
+        if source_rows.is_empty() {
+            let on_empty = step.on_empty.unwrap_or_default();
+            match on_empty {
+                OnEmpty::Skip => {
+                    debug!(
+                        "Step '{}' skipped: foreach source '{}' is empty",
+                        step.name, foreach_clause.source_step
+                    );
+                    return Ok(StepOutput::empty(start.elapsed()));
+                }
+                OnEmpty::Error => {
+                    return Err(Error::execution(format!(
+                        "Foreach source '{}' is empty for step '{}'",
+                        foreach_clause.source_step, step.name
+                    )));
                 }
             }
-            Err(e) => StepResult {
-                name: step.name.clone(),
-                status: StepStatus::Failed,
-                row_count: None,
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_path: None,
-                error: Some(format!("Failed to write results: {}", e)),
-            },
-        }
-    }
-
-    /// Write query response to CSV
-    async fn write_csv_results(
-        &self,
-        response: &QueryResponse,
-        output_path: &Path,
-        _workspace: &Workspace,
-        _timestamp: &str,
-    ) -> Result<usize> {
-        if response.tables.is_empty() {
-            return Err(Error::query("Query returned no tables"));
         }
 
-        let table = &response.tables[0];
-        let mut content = String::new();
+        let total_iterations = source_rows.len();
+        let mut all_results: Vec<JsonValue> = Vec::new();
+        let mut failed_count = 0;
+        let on_error = step.on_error.unwrap_or_default();
 
-        // Header
-        let headers: Vec<_> = table.columns.iter().map(|c| c.name.clone()).collect();
-        content.push_str(&headers.join(","));
-        content.push('\n');
+        debug!(
+            "Step '{}' starting foreach over {} rows from '{}'",
+            step.name, total_iterations, foreach_clause.source_step
+        );
 
-        // Rows
-        let mut row_count = 0;
-        for row in &table.rows {
-            if let Some(row_array) = row.as_array() {
-                let values: Vec<String> = row_array
-                    .iter()
-                    .map(|v| format_csv_value(v))
-                    .collect();
-                content.push_str(&values.join(","));
-                content.push('\n');
-                row_count += 1;
+        for (index, row) in source_rows.iter().enumerate() {
+            // Emit foreach progress
+            if let Some(tx) = progress {
+                tx.send(super::progress::ProgressUpdate::ForeachProgress {
+                    job_id: tx.job_id(),
+                    step_name: step.name.clone(),
+                    workspace: workspace.name.clone(),
+                    current: index + 1,
+                    total: total_iterations,
+                    timestamp: chrono::Utc::now(),
+                });
+            }
+
+            // Create context with foreach row
+            let mut iter_context = substitution.clone();
+            iter_context.foreach_row = Some((foreach_clause.alias.clone(), row.clone()));
+
+            // Execute single iteration
+            let iter_result = self
+                .execute_step(step, workspace, &iter_context, output_dir)
+                .await;
+
+            match iter_result {
+                Ok(output) => {
+                    // Aggregate results based on strategy
+                    match step.aggregate.unwrap_or_default() {
+                        AggregateStrategy::Append => {
+                            all_results.extend(output.rows);
+                        }
+                        AggregateStrategy::Collect => {
+                            // Wrap each iteration's results as a single array element
+                            all_results.push(serde_json::json!({
+                                "_iteration": index,
+                                "_source_row": row,
+                                "results": output.rows,
+                            }));
+                        }
+                        AggregateStrategy::Merge => {
+                            // For merge, we take the first row from each iteration
+                            if let Some(first) = output.rows.into_iter().next() {
+                                all_results.push(first);
+                            }
+                        }
+                        AggregateStrategy::Replace => {
+                            // Replace keeps only the last iteration's results
+                            all_results = output.rows;
+                        }
+                    }
+                }
+                Err(e) => {
+                    failed_count += 1;
+                    warn!(
+                        "Foreach iteration {}/{} failed for step '{}': {}",
+                        index + 1,
+                        total_iterations,
+                        step.name,
+                        e
+                    );
+
+                    match on_error {
+                        OnError::Fail => {
+                            return Err(Error::execution(format!(
+                                "Foreach iteration {} failed: {}",
+                                index + 1,
+                                e
+                            )));
+                        }
+                        OnError::Skip | OnError::Continue => {
+                            // Continue to next iteration
+                            continue;
+                        }
+                    }
+                }
             }
         }
 
-        fs::write(output_path, content).await?;
-        Ok(row_count)
+        let successful = total_iterations - failed_count;
+        debug!(
+            "Step '{}' foreach completed: {}/{} iterations successful, {} total results",
+            step.name,
+            successful,
+            total_iterations,
+            all_results.len()
+        );
+
+        Ok(StepOutput::from_rows(all_results, start.elapsed()))
     }
 }
 
@@ -563,12 +819,17 @@ impl ExecutionEngine for PackExecutor {
         let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
         let pack = &config.pack;
 
+        info!(
+            "Starting pack '{}' execution across {} workspaces",
+            pack.name, num_workspaces
+        );
+
         // Execute across workspaces
         let mut workspace_results: HashMap<String, WorkspaceResult> = HashMap::new();
 
         for workspace in &workspaces {
             let result = self
-                .execute_workspace(pack, workspace, &config, &timestamp)
+                .execute_workspace(pack, workspace, &config, &timestamp, progress.as_ref())
                 .await;
             workspace_results.insert(workspace.workspace_id.clone(), result);
         }
@@ -588,6 +849,9 @@ impl ExecutionEngine for PackExecutor {
             ExecutionStatus::Partial
         };
 
+        // Build execution trace from results
+        let trace = self.build_trace(pack, &workspace_results);
+
         let result = PackExecutorResult {
             job_id,
             pack_name: pack.name.clone(),
@@ -595,8 +859,16 @@ impl ExecutionEngine for PackExecutor {
             workspace_results,
             duration_ms: start.elapsed().as_millis() as u64,
             output_dir: config.output_dir,
-            trace: None,
+            trace: Some(trace),
         };
+
+        info!(
+            "Pack '{}' completed: {} succeeded, {} failed in {}ms",
+            pack.name,
+            result.success_count(),
+            result.failure_count(),
+            result.duration_ms
+        );
 
         // Notify completion
         if let Some(ref tx) = progress {
@@ -615,7 +887,22 @@ impl ExecutionEngine for PackExecutor {
     }
 
     fn validate(&self, config: &Self::Config) -> Result<()> {
-        config.pack.validate()
+        // Validate pack structure
+        config.pack.validate()?;
+
+        // Validate each step with its handler
+        for step in &config.pack.steps {
+            if let Some(handler) = self.get_handler(step.step_type) {
+                handler.validate(step)?;
+            } else {
+                return Err(Error::pack(format!(
+                    "No handler for step type {:?} in step '{}'",
+                    step.step_type, step.name
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     fn executor_name(&self) -> &'static str {
@@ -623,20 +910,60 @@ impl ExecutionEngine for PackExecutor {
     }
 }
 
+/// Write rows to CSV file
+async fn write_csv_results(rows: &[JsonValue], path: &std::path::Path) -> Result<()> {
+    if rows.is_empty() {
+        fs::write(path, "").await?;
+        return Ok(());
+    }
+
+    let mut content = String::new();
+
+    // Get columns from first row
+    let columns: Vec<&str> = rows
+        .first()
+        .and_then(|r| r.as_object())
+        .map(|obj| obj.keys().map(|k| k.as_str()).collect())
+        .unwrap_or_default();
+
+    // Header
+    content.push_str(&columns.join(","));
+    content.push('\n');
+
+    // Rows
+    for row in rows {
+        if let Some(obj) = row.as_object() {
+            let values: Vec<String> = columns
+                .iter()
+                .map(|col| {
+                    obj.get(*col)
+                        .map(|v| format_csv_value(v))
+                        .unwrap_or_default()
+                })
+                .collect();
+            content.push_str(&values.join(","));
+            content.push('\n');
+        }
+    }
+
+    fs::write(path, content).await?;
+    Ok(())
+}
+
 /// Format a JSON value for CSV
-fn format_csv_value(value: &serde_json::Value) -> String {
+fn format_csv_value(value: &JsonValue) -> String {
     match value {
-        serde_json::Value::Null => String::new(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => {
+        JsonValue::Null => String::new(),
+        JsonValue::Bool(b) => b.to_string(),
+        JsonValue::Number(n) => n.to_string(),
+        JsonValue::String(s) => {
             if s.contains(',') || s.contains('"') || s.contains('\n') {
                 format!("\"{}\"", s.replace('"', "\"\""))
             } else {
                 s.clone()
             }
         }
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+        JsonValue::Array(_) | JsonValue::Object(_) => {
             let json_str = value.to_string();
             format!("\"{}\"", json_str.replace('"', "\"\""))
         }
@@ -675,5 +1002,17 @@ mod tests {
     fn test_status_display() {
         assert_eq!(ExecutionStatus::Success.to_string(), "Success");
         assert_eq!(ExecutionStatus::Failed.to_string(), "Failed");
+    }
+
+    #[test]
+    fn test_format_csv_value() {
+        assert_eq!(format_csv_value(&JsonValue::Null), "");
+        assert_eq!(format_csv_value(&serde_json::json!(true)), "true");
+        assert_eq!(format_csv_value(&serde_json::json!(42)), "42");
+        assert_eq!(format_csv_value(&serde_json::json!("hello")), "hello");
+        assert_eq!(
+            format_csv_value(&serde_json::json!("hello,world")),
+            "\"hello,world\""
+        );
     }
 }

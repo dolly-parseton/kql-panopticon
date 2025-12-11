@@ -166,6 +166,17 @@ impl StepTrace {
 pub enum StepType {
     Kql,
     Http,
+    File,
+}
+
+impl From<crate::pack::StepType> for StepType {
+    fn from(st: crate::pack::StepType) -> Self {
+        match st {
+            crate::pack::StepType::Kql => StepType::Kql,
+            crate::pack::StepType::Http => StepType::Http,
+            crate::pack::StepType::File => StepType::File,
+        }
+    }
 }
 
 /// Status in trace
