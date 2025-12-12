@@ -48,6 +48,12 @@ use crate::error::{Error, Result};
 // Re-export types from kql-language-ffi for convenience
 pub use kql_language_ffi::{Column, Diagnostic, DiagnosticSeverity, Function, Schema, Table, ValidationResult};
 
+// Re-export classification types for syntax highlighting
+pub use kql_language_ffi::{ClassificationKind, ClassifiedSpan, ClassificationResult};
+
+// Re-export completion types for code completion
+pub use kql_language_ffi::{CompletionItem, CompletionKind, CompletionResult};
+
 /// KQL query validator
 ///
 /// Wraps the FFI bindings to Microsoft's Kusto.Language library.
@@ -120,6 +126,38 @@ impl KqlValidator {
     /// Returns true if the native library supports syntax classification.
     pub fn supports_classification(&self) -> bool {
         self.inner.supports_classification()
+    }
+
+    /// Get syntax classifications for highlighting
+    ///
+    /// Returns classified spans for syntax highlighting.
+    pub fn get_classifications(&self, query: &str) -> Result<ClassificationResult> {
+        self.inner
+            .get_classifications(query)
+            .map_err(|e| Error::Validation {
+                message: format!("Classification failed: {}", e),
+                line: None,
+                column: None,
+            })
+    }
+
+    /// Get code completions at cursor position
+    ///
+    /// Returns completion items at the given cursor offset.
+    /// Optionally uses schema for table/column completion.
+    pub fn get_completions(
+        &self,
+        query: &str,
+        cursor_offset: usize,
+        schema: Option<&Schema>,
+    ) -> Result<CompletionResult> {
+        self.inner
+            .get_completions(query, cursor_offset, schema)
+            .map_err(|e| Error::Validation {
+                message: format!("Completion failed: {}", e),
+                line: None,
+                column: None,
+            })
     }
 }
 

@@ -22,7 +22,12 @@
 mod commands;
 mod completer;
 mod context;
+mod editor;
 mod history;
+mod prompt;
+mod session;
+mod state_graph;
+mod validator;
 
 use anyhow::Result;
 use clap_repl::{ClapEditor, ReadCommandOutput};
@@ -30,7 +35,9 @@ use commands::{CommandResult, ReplCommand};
 use completer::PanopticonCompleter;
 use context::create_shared_context;
 use kql_panopticon_core::{Client, Workspace};
-use reedline::{DefaultPrompt, DefaultPromptSegment, ExternalPrinter};
+use prompt::DynamicPrompt;
+use reedline::ExternalPrinter;
+use validator::LineContinuationValidator;
 use std::sync::Arc;
 
 const BANNER: &str = r#"
@@ -58,20 +65,22 @@ async fn main() -> Result<()> {
     // Create custom completer with context access
     let completer = PanopticonCompleter::new(ctx.clone());
 
+    // Create dynamic prompt that reads from context
+    let dynamic_prompt = DynamicPrompt::new(ctx.clone());
+
     // Create external printer for async notifications
     let printer: ExternalPrinter<String> = ExternalPrinter::default();
     let printer = Arc::new(printer.clone());
 
-    // Create REPL editor with custom completer and external printer
+    // Create REPL editor with custom completer, dynamic prompt, validator, and external printer
     let printer_for_editor = (*printer).clone();
+    let line_validator = LineContinuationValidator::new();
     let mut editor = ClapEditor::<ReplCommand>::builder()
-        .with_prompt(Box::new(DefaultPrompt::new(
-            DefaultPromptSegment::Basic("panopticon".to_string()),
-            DefaultPromptSegment::Empty,
-        )))
+        .with_prompt(Box::new(dynamic_prompt))
         .with_editor_hook(move |rl| {
             rl.with_completer(Box::new(completer))
                 .with_external_printer(printer_for_editor)
+                .with_validator(Box::new(line_validator))
         })
         .build();
 
@@ -104,56 +113,9 @@ async fn main() -> Result<()> {
     }
 
     // Main REPL loop
+    // The DynamicPrompt automatically reads from context on each render,
+    // so we don't need to update the prompt manually
     loop {
-        // Update prompt based on context status
-        // Left side: context (workspace, pack selection)
-        // Right side: background activity indicators
-        {
-            let ctx_read = ctx.read().await;
-            let summary = ctx_read.status_summary();
-
-            // Left prompt: selection context
-            let left = if let Some(ws) = &summary.selected_workspace {
-                if summary.selected_count > 1 {
-                    format!("panopticon ({}+{})", ws, summary.selected_count - 1)
-                } else {
-                    format!("panopticon ({})", ws)
-                }
-            } else {
-                "panopticon".to_string()
-            };
-
-            // Right prompt: activity indicators
-            let mut right_parts = Vec::new();
-
-            if summary.discovering {
-                right_parts.push("discovering...".to_string());
-            } else if let Some(err) = &summary.discovery_error {
-                right_parts.push(format!("! {}", truncate_str(err, 20)));
-            } else if summary.initialized {
-                right_parts.push(format!("{} ws", summary.workspace_count));
-            }
-
-            if summary.running_jobs > 0 {
-                right_parts.push(format!("{} jobs", summary.running_jobs));
-            }
-
-            if let Some(pack) = &summary.loaded_pack {
-                right_parts.push(format!("pack:{}", pack));
-            }
-
-            let right = if right_parts.is_empty() {
-                DefaultPromptSegment::Empty
-            } else {
-                DefaultPromptSegment::Basic(format!("[{}]", right_parts.join(" | ")))
-            };
-
-            editor.set_prompt(Box::new(DefaultPrompt::new(
-                DefaultPromptSegment::Basic(left),
-                right,
-            )));
-        }
-
         // Read and parse command
         let output = editor.read_command();
 
@@ -200,8 +162,8 @@ async fn main() -> Result<()> {
                 eprintln!("Input error: {}", e);
             }
             ReadCommandOutput::CtrlC => {
-                println!("Goodbye!");
-                break;
+                // println!("Goodbye!");
+                // break;
             }
             ReadCommandOutput::CtrlD => {
                 // Exit on Ctrl+D

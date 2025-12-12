@@ -28,6 +28,7 @@ impl ExecutionHistory {
     }
 
     /// Get all executions
+    #[allow(dead_code)]
     pub fn all(&self) -> &[ExecutionRecord] {
         &self.executions
     }
@@ -43,6 +44,7 @@ impl ExecutionHistory {
     }
 
     /// Get execution by ID
+    #[allow(dead_code)]
     pub fn get(&self, id: &Uuid) -> Option<&ExecutionRecord> {
         self.executions.iter().find(|e| &e.id == id)
     }
@@ -56,6 +58,7 @@ impl ExecutionHistory {
     }
 
     /// Count total executions
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.executions.len()
     }
@@ -66,6 +69,7 @@ impl ExecutionHistory {
     }
 
     /// Clear history
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.executions.clear();
     }
@@ -107,12 +111,14 @@ impl ExecutionRecord {
     }
 
     /// Set the result summary
+    #[allow(dead_code)]
     pub fn with_result(mut self, result: ExecutionSummary) -> Self {
         self.result = result;
         self
     }
 
     /// Set the output path
+    #[allow(dead_code)]
     pub fn with_output_path(mut self, path: PathBuf) -> Self {
         self.output_path = Some(path);
         self

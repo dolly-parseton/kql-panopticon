@@ -140,6 +140,7 @@ public static class ValidationService
 
     /// <summary>
     /// Map a data type string to a Kusto type string.
+    /// Handles both KQL type names and .NET type names from schema capture.
     /// </summary>
     private static string MapDataType(string? dataType)
     {
@@ -149,6 +150,7 @@ public static class ValidationService
         // Normalize to lowercase for matching
         return dataType.ToLowerInvariant() switch
         {
+            // KQL type names
             "string" => "string",
             "long" => "long",
             "int" => "int",
@@ -163,7 +165,28 @@ public static class ValidationService
             "uuid" => "guid",
             "dynamic" => "dynamic",
             "decimal" => "decimal",
-            _ => dataType // Pass through unknown types
+
+            // .NET type names (from schema capture)
+            "system.string" => "string",
+            "system.int64" => "long",
+            "system.int32" => "int",
+            "system.double" => "real",
+            "system.single" => "real",
+            "system.boolean" => "bool",
+            "system.datetime" => "datetime",
+            "system.datetimeoffset" => "datetime",
+            "system.timespan" => "timespan",
+            "system.guid" => "guid",
+            "system.decimal" => "decimal",
+            "system.object" => "dynamic",
+            "system.sbyte" => "int",
+            "system.byte" => "int",
+            "system.int16" => "int",
+            "system.uint16" => "int",
+            "system.uint32" => "long",
+            "system.uint64" => "long",
+
+            _ => "dynamic" // Default to dynamic for unknown types
         };
     }
 

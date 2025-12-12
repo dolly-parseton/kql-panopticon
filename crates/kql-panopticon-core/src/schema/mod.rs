@@ -17,10 +17,22 @@
 //! ## Storage
 //!
 //! Schemas are persisted to `~/.kql-panopticon/schemas.json` and loaded on startup.
+//!
+//! ## Schema Capture
+//!
+//! The [`capture`] module provides workspace schema discovery:
+//! 1. Run `search * | distinct $table` to discover tables
+//! 2. For each table, run `T | getschema` to capture columns
+//! 3. Update the registry with discovered schemas
 
+mod capture;
 mod registry;
 mod types;
 
+pub use capture::{
+    CaptureConfig, CapturePhase, CaptureProgress, CaptureResult,
+    ProgressCallback, SchemaCapture, SchemaStatus, get_schema_status,
+};
 pub use registry::SchemaRegistry;
 pub use types::{
     SchemaType, TableInfo, WorkspaceSchema, ColumnDef, RegistryData,

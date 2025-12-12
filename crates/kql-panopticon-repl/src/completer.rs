@@ -33,11 +33,10 @@ impl PanopticonCompleter {
         }
 
         // Extract the partial workspace name being typed
-        let partial = if trimmed.starts_with("workspace select ") {
-            &trimmed["workspace select ".len()..]
-        } else {
-            &trimmed["ws select ".len()..]
-        };
+        let partial = trimmed
+            .strip_prefix("workspace select ")
+            .or_else(|| trimmed.strip_prefix("ws select "))
+            .unwrap_or("");
 
         // Skip if user is typing a flag
         if partial.starts_with('-') {

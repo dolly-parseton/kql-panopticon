@@ -34,6 +34,8 @@ chrono.workspace = true
 dirs.workspace = true
 log.workspace = true
 uuid.workspace = true
+indexmap = { version = "2.7", features = ["serde"] }
+regex.workspace = true
 
 # CLI/REPL
 clap.workspace = true
@@ -46,6 +48,7 @@ env_logger.workspace = true
 # TUI (for popups, editor, monitor)
 ratatui.workspace = true
 crossterm.workspace = true
+tui-textarea = "0.6"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

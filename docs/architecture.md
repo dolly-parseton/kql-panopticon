@@ -38,10 +38,11 @@ kql-panopticon/
 │           ├── result/           # Result storage
 │           │   ├── mod.rs
 │           │   └── store.rs
-│           ├── pack/             # Pack definitions
+│           ├── pack.rs           # Unified pack definitions
+│           ├── schema/           # Schema registry
 │           │   ├── mod.rs
-│           │   ├── query.rs      # QueryPack
-│           │   └── investigation.rs # InvestigationPack
+│           │   ├── types.rs      # Schema types
+│           │   └── registry.rs   # SchemaRegistry
 │           └── validation/       # KQL validation (optional)
 │               └── mod.rs
 │
@@ -184,15 +185,39 @@ Default implementation: `FileResultStore`
 
 ### `pack` - Pack Definitions
 
-Data structures for pack files:
-- `QueryPack` - Simple query collections
-- `InvestigationPack` - Chained investigations with all features
+Unified pack structure for all query execution:
+
+- Single `Pack` type (no separate QueryPack/InvestigationPack)
+- Dependency-driven execution model
+- Simple packs (no dependencies) execute in parallel
+- Complex packs (with dependencies) execute in topological order
+- Step types: `kql`, `http`, `file`
+
+### `schema` - Schema Registry
+
+Persistent cache of table schemas for validation and completion:
+
+- **Storage**: `~/.kql-panopticon/schemas.json`
+- **Schema types**:
+  - `Canonical` - Fixed schema, shared across workspaces (SecurityEvent, SigninLogs)
+  - `Extensible` - Base schema + per-workspace extensions (AzureDiagnostics, Syslog)
+  - `Custom` - Entirely workspace-specific (*_CL tables)
+- **Workspace tracking**: Which tables exist in which workspaces
+- **Staleness**: 30-day threshold with refresh prompts
+- **Capture**: Via schema discovery pack (see ADR-001)
+
+```rust
+pub struct SchemaRegistry {
+    tables: HashMap<String, TableInfo>,      // Canonical schemas
+    workspaces: HashMap<String, WorkspaceSchema>, // Per-workspace info
+}
+```
 
 ### `validation` - KQL Validation (Optional)
 
 When the `kql-validation` feature is enabled:
 - Syntax validation
-- Schema-aware semantic validation
+- Schema-aware semantic validation (uses SchemaRegistry)
 - Uses .NET AOT compiled Kusto.Language library
 
 ## Execution Models
@@ -457,3 +482,23 @@ The ExecutionEngine trait could support distributed backends:
 - Kubernetes jobs
 - Azure Functions
 - Distributed query coordinators
+
+## Decision Records
+
+Architectural decisions are documented in `docs/decisions/`:
+
+- [ADR-001: Schema Capture Strategy](decisions/001-schema-capture.md) - How we capture and cache table schemas
+- [ADR-002: Exploring Interpreter REPL](decisions/002-exploring-interpreter-repl.md) - Principled REPL design for investigation workflows
+
+## Design Documents
+
+Active design specifications:
+
+- [REPL Pack Authoring](design/repl-pack-authoring.md) - Interactive pack building in the REPL
+- [REPL Implementation Plan](design/repl-implementation-plan.md) - Phased implementation with user tests
+
+## Research
+
+Background research informing architectural decisions:
+
+- [REPL Interpreter Design](research/repl-interpreter-design.md) - Formal REPL semantics and exploring interpreter patterns

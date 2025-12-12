@@ -3,12 +3,15 @@
 //! Uses clap derive to define the command structure.
 //! Each subcommand module contains its handler implementation.
 
+pub mod authoring;
+pub mod exploration;
 pub mod jobs;
 pub mod pack;
 pub mod run;
 pub mod workspace;
 
 use crate::context::SharedContext;
+use crate::validator::join_continuation_lines;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
@@ -24,6 +27,82 @@ pub struct ReplCommand {
 #[derive(Debug, Subcommand)]
 #[command(disable_help_subcommand = true)]
 pub enum Command {
+    // === Pack Authoring Commands ===
+    /// Define a user input parameter
+    #[command(alias = "in")]
+    Input {
+        /// Input name
+        name: String,
+        /// Value (opens editor if omitted)
+        #[arg(value_parser = parse_assignment, trailing_var_arg = true, num_args = 0..)]
+        value: Vec<String>,
+    },
+
+    /// Define a query step
+    Query {
+        /// Step name
+        name: String,
+        /// KQL query (opens editor if omitted)
+        #[arg(value_parser = parse_assignment, trailing_var_arg = true, num_args = 0..)]
+        kql: Vec<String>,
+    },
+
+    /// List defined inputs
+    Inputs,
+
+    /// List defined query steps
+    Steps {
+        /// Show full query for a specific step
+        #[arg(long)]
+        show: Option<String>,
+    },
+
+    /// Remove an input or step
+    #[command(alias = "rm")]
+    Remove {
+        /// Name of input or step to remove
+        name: String,
+    },
+
+    /// Edit an existing input or step
+    Edit {
+        /// Name of input or step to edit
+        name: String,
+    },
+
+    /// Show pack session info
+    Info,
+
+    /// Start a new pack session
+    New {
+        /// Pack name
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    // === Exploring Interpreter Commands ===
+    /// Revert to a previous state
+    #[command(alias = "undo")]
+    Revert {
+        /// State ID to revert to (default: previous state)
+        state_id: Option<u64>,
+    },
+
+    /// Manage checkpoints
+    #[command(alias = "cp")]
+    Checkpoint {
+        #[command(subcommand)]
+        action: exploration::CheckpointAction,
+    },
+
+    /// Show execution history
+    Trace {
+        /// Show as tree with branches
+        #[arg(long)]
+        tree: bool,
+    },
+
+    // === Workspace & Pack Management ===
     /// Manage workspaces
     #[command(alias = "ws")]
     Workspace {
@@ -37,6 +116,7 @@ pub enum Command {
         action: pack::PackAction,
     },
 
+    // === Execution ===
     /// Execute queries or packs
     Run {
         /// Execute an ad-hoc query instead of loaded pack
@@ -52,9 +132,12 @@ pub enum Command {
         all: bool,
     },
 
-    /// Validate loaded pack or query
+    /// Validate loaded pack, session steps, or ad-hoc query
     Validate {
-        /// Query to validate (uses loaded pack if not specified)
+        /// Validate a specific session step by name
+        step: Option<String>,
+
+        /// Validate an ad-hoc query string
         #[arg(long, short)]
         query: Option<String>,
     },
@@ -103,13 +186,61 @@ pub enum Command {
     Exit,
 }
 
+/// Parse an assignment value (handles `= "value"` syntax)
+fn parse_assignment(s: &str) -> Result<String, String> {
+    // Strip leading `=` if present
+    let s = s.strip_prefix('=').unwrap_or(s).trim();
+
+    // Strip surrounding quotes if present
+    let s = s
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(s);
+
+    Ok(s.to_string())
+}
+
 /// Execute a parsed command
 pub async fn execute(command: Command, ctx: SharedContext) -> Result<CommandResult> {
     match command {
+        // Pack authoring commands
+        Command::Input { name, value } => {
+            let value = if value.is_empty() {
+                None
+            } else {
+                Some(value.join(" "))
+            };
+            authoring::input(name, value, ctx).await
+        }
+        Command::Query { name, kql } => {
+            let kql = if kql.is_empty() {
+                None
+            } else {
+                // Join parts and process line continuation sequences
+                let joined = kql.join(" ");
+                Some(join_continuation_lines(&joined))
+            };
+            authoring::query(name, kql, ctx).await
+        }
+        Command::Inputs => authoring::list_inputs(ctx).await,
+        Command::Steps { show } => authoring::list_steps(show, ctx).await,
+        Command::Remove { name } => authoring::remove(name, ctx).await,
+        Command::Edit { name } => authoring::edit(name, ctx).await,
+        Command::Info => authoring::info(ctx).await,
+        Command::New { name } => authoring::new_session(name, ctx).await,
+
+        // Exploring interpreter commands
+        Command::Revert { state_id } => exploration::revert(state_id, ctx).await,
+        Command::Checkpoint { action } => exploration::checkpoint(action, ctx).await,
+        Command::Trace { tree } => exploration::trace(tree, ctx).await,
+
+        // Workspace and pack management
         Command::Workspace { action } => workspace::execute(action, ctx).await,
         Command::Pack { action } => pack::execute(action, ctx).await,
+
+        // Execution
         Command::Run { query, timespan, all } => run::execute(query, timespan, all, ctx).await,
-        Command::Validate { query } => run::validate(query, ctx).await,
+        Command::Validate { step, query } => run::validate(step, query, ctx).await,
         Command::Jobs { action } => jobs::execute(action, ctx).await,
         Command::Results { job_id } => jobs::results(job_id, ctx).await,
         Command::History { count } => history(count, ctx).await,
@@ -140,6 +271,7 @@ pub enum CommandResult {
 }
 
 impl CommandResult {
+    #[allow(dead_code)]
     pub fn success() -> Self {
         Self::Success(None)
     }
@@ -278,41 +410,66 @@ fn help(command: Option<String>) -> Result<CommandResult> {
         None => {
             let help = r#"Available commands:
 
-  workspace (ws)  Manage workspaces
-    list          Discover and list available workspaces
-    select        Select workspace(s) for execution
+Pack Authoring:
+  input <name> [= "<value>"]   Define a user input parameter
+  query <name> [= "<kql>"]     Define a query step (use \ for line continuation)
+  inputs                       List defined inputs
+  steps [--show <name>]        List steps or show full query for a step
+  remove <name>                Remove an input or step
+  info                         Show pack session info
+  new [--name "<name>"]        Start a new pack session
 
-  pack            Manage query packs
-    load          Load a pack from file
-    info          Show loaded pack details
-    validate      Validate pack queries
+Exploring (Backtracking & Checkpoints):
+  revert [N]                   Return to state #N (default: previous)
+  checkpoint (cp)              Manage named checkpoints
+    save <name>                Save current state as checkpoint
+    restore <name>             Return to checkpoint
+    list                       List all checkpoints
+    delete <name>              Delete a checkpoint
+  trace [--tree]               Show execution history
 
-  run             Execute loaded pack or ad-hoc query
-    --query       Execute ad-hoc query
-    --timespan    Set query timespan
-    --all         Run on all workspaces
+Workspace & Pack Management:
+  workspace (ws)               Manage workspaces
+    list                       Discover and list workspaces
+    select <name>              Select workspace for execution
+    schema                     Show schema status for all workspaces
+    schema --capture           Capture schema for selected workspace(s)
+  pack                         Manage query packs
+    load <path>                Load a pack from file
 
-  validate        Validate query syntax
+Execution:
+  run                          Execute session steps or loaded pack
+    --query "<kql>"            Execute ad-hoc query
+  validate                     Validate query syntax
 
-  jobs            View job status
-    list          List all jobs
-    view          View job details
+Jobs & Results:
+  jobs                         View running/completed jobs
+  results [job_id]             View execution results
+  history                      Show execution history
 
-  results         View execution results
+Other:
+  config                       Show/set configuration
+  status                       Show current status
+  clear                        Clear the screen
+  help [command]               Show this help
+  exit (quit, q)               Exit the REPL
 
-  history         Show execution history
+Examples:
+  input threat_ip = "10.0.0.1"
+  query events = "SecurityEvent | take 10"
+  query filtered = "{{events}} | where IP == '{{inputs.threat_ip}}'"
 
-  config          Show/set configuration
+Multi-line queries (use \ for continuation):
+  query complex = "SecurityEvent \
+  . | where EventID == 4625 \
+  . | project Account, IpAddress"
 
-  status          Show current status
-
-  clear           Clear the screen
-
-  help            Show this help
-
-  exit (quit, q)  Exit the REPL
-
-Type 'help <command>' for more details on a specific command.
+Exploring example:
+  panopticon #3 > checkpoint save before-analysis
+  panopticon #3 [before-analysis] > query step1 = "..."
+  panopticon #4 > query step2 = "..."
+  panopticon #5 > revert 3           # back to checkpoint
+  panopticon #3 > trace              # see history
 "#;
             Ok(CommandResult::output(help))
         }

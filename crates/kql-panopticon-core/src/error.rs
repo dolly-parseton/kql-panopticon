@@ -76,6 +76,13 @@ pub enum Error {
         column: Option<usize>,
     },
 
+    /// Schema registry errors
+    #[error("Schema error: {message}")]
+    Schema {
+        message: String,
+        table: Option<String>,
+    },
+
     /// Timeout errors
     #[error("Timeout: {message}")]
     Timeout { message: String },
@@ -180,6 +187,14 @@ impl Error {
     pub fn timeout(message: impl Into<String>) -> Self {
         Self::Timeout {
             message: message.into(),
+        }
+    }
+
+    /// Create a schema error
+    pub fn schema(message: impl Into<String>) -> Self {
+        Self::Schema {
+            message: message.into(),
+            table: None,
         }
     }
 

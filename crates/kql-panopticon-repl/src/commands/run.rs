@@ -283,91 +283,280 @@ async fn execute_pack(all: bool, ctx: SharedContext) -> Result<CommandResult> {
     Ok(CommandResult::output(output))
 }
 
-/// Validate a query or loaded pack
-pub async fn validate(query: Option<String>, ctx: SharedContext) -> Result<CommandResult> {
-    match query {
-        Some(q) => validate_single_query(&q),
-        None => {
-            // Validate loaded pack
-            let ctx = ctx.read().await;
-            let loaded = ctx.loaded_pack().ok_or_else(|| {
-                anyhow::anyhow!("No pack loaded and no query provided")
-            })?;
+/// Validate a query, session steps, or loaded pack
+pub async fn validate(
+    step: Option<String>,
+    query: Option<String>,
+    ctx: SharedContext,
+) -> Result<CommandResult> {
+    let ctx = ctx.read().await;
 
-            let mut output = String::new();
-            let mut has_errors = false;
+    // Get schema for validation if available
+    let workspace_id = ctx.selected_workspaces().first().map(|ws| ws.workspace_id.as_str());
+    let schema = ctx.schema_registry().map(|r| r.to_validation_schema(workspace_id));
 
-            output.push_str(&format!("Validating '{}'...\n\n", loaded.pack.name));
-
-            // Try to create a validator
-            let validator = match kql_panopticon_core::validation::KqlValidator::new() {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    output.push_str(&format!("Warning: Validator unavailable: {}\n\n", e));
-                    None
-                }
-            };
-
-            for step in &loaded.pack.steps {
-                if let Some(q) = &step.query {
-                    if let Some(ref v) = validator {
-                        match v.validate_syntax(q) {
-                            Ok(result) if result.is_valid() => {
-                                output.push_str(&format!("  ✓ {}\n", step.name));
-                            }
-                            Ok(result) => {
-                                has_errors = true;
-                                let errs: Vec<_> = result.errors().collect();
-                                output.push_str(&format!(
-                                    "  ✗ {} ({} errors)\n",
-                                    step.name,
-                                    errs.len()
-                                ));
-                                for err in errs {
-                                    output.push_str(&format!(
-                                        "      Line {}, Col {}: {}\n",
-                                        err.line, err.column, err.message
-                                    ));
-                                }
-                            }
-                            Err(e) => {
-                                output.push_str(&format!(
-                                    "  ? {} (error: {})\n",
-                                    step.name, e
-                                ));
-                            }
-                        }
-                    } else {
-                        output.push_str(&format!("  ? {} (validator unavailable)\n", step.name));
-                    }
-                }
-            }
-
-            if has_errors {
-                output.push_str("\nValidation completed with errors");
-            } else if validator.is_some() {
-                output.push_str("\nAll queries valid");
-            }
-
-            Ok(CommandResult::output(output))
-        }
+    // Priority: query > step > session > pack
+    if let Some(q) = query {
+        return validate_single_query(&q, schema.as_ref());
     }
+
+    // Validate specific session step
+    if let Some(step_name) = step {
+        return validate_session_step(&step_name, ctx.pack_session(), schema.as_ref());
+    }
+
+    // If session has steps, validate those
+    if !ctx.pack_session().steps.is_empty() {
+        return validate_session_steps(ctx.pack_session(), schema.as_ref());
+    }
+
+    // Otherwise validate loaded pack
+    let loaded = ctx.loaded_pack().ok_or_else(|| {
+        anyhow::anyhow!("No session steps, no pack loaded, and no query provided.\nDefine steps with 'query <name> = \"<kql>\"' or load a pack with 'pack load <path>'")
+    })?;
+
+    validate_loaded_pack(loaded, schema.as_ref())
 }
 
-fn validate_single_query(query: &str) -> Result<CommandResult> {
+/// Validate a single session step by name
+fn validate_session_step(
+    step_name: &str,
+    session: &crate::session::PackSession,
+    schema: Option<&kql_panopticon_core::validation::Schema>,
+) -> Result<CommandResult> {
+    let step = session.get_step(step_name).ok_or_else(|| {
+        anyhow::anyhow!("Step '{}' not found", step_name)
+    })?;
+
     let validator = match kql_panopticon_core::validation::KqlValidator::new() {
         Ok(v) => v,
         Err(e) => return Ok(CommandResult::error(format!("Validator unavailable: {}", e))),
     };
 
-    match validator.validate_syntax(query) {
-        Ok(result) if result.is_valid() => {
-            Ok(CommandResult::message("Query is valid"))
+    // Prepare query for validation (substitute references)
+    let prepared_query = session.prepare_query_for_validation(&step.query);
+
+    // Use schema-aware validation if available
+    let result = match schema {
+        Some(s) if validator.supports_schema_validation() => {
+            validator.validate_with_schema(&prepared_query, s)
         }
-        Ok(result) => {
+        _ => validator.validate_syntax(&prepared_query),
+    };
+
+    let validation_type = if schema.is_some() { "schema" } else { "syntax" };
+
+    match result {
+        Ok(r) if r.is_valid() => {
+            Ok(CommandResult::message(format!(
+                "\x1b[32m✓\x1b[0m Step '{}' is valid ({} validation)",
+                step_name, validation_type
+            )))
+        }
+        Ok(r) => {
+            let errs: Vec<_> = r.errors().collect();
+            let mut output = format!(
+                "\x1b[31m✗\x1b[0m Step '{}' has {} error(s) ({} validation):\n",
+                step_name,
+                errs.len(),
+                validation_type
+            );
+            for err in errs {
+                output.push_str(&format!(
+                    "  Line {}, Col {}: {}\n",
+                    err.line, err.column, err.message
+                ));
+            }
+            if step.query != prepared_query {
+                output.push_str("\nNote: References were substituted with example values for validation.");
+            }
+            Ok(CommandResult::output(output))
+        }
+        Err(e) => Ok(CommandResult::error(format!("Validation error: {}", e))),
+    }
+}
+
+/// Validate all session steps
+fn validate_session_steps(
+    session: &crate::session::PackSession,
+    schema: Option<&kql_panopticon_core::validation::Schema>,
+) -> Result<CommandResult> {
+    let validator = match kql_panopticon_core::validation::KqlValidator::new() {
+        Ok(v) => Some(v),
+        Err(e) => {
+            return Ok(CommandResult::output(format!(
+                "Warning: Validator unavailable: {}\nCannot validate session steps.",
+                e
+            )));
+        }
+    };
+
+    let validator = validator.unwrap();
+    let validation_type = if schema.is_some() { "schema" } else { "syntax" };
+    let mut output = format!(
+        "Validating {} session step(s) ({} validation)...\n\n",
+        session.steps.len(),
+        validation_type
+    );
+    let mut valid_count = 0;
+    let mut error_count = 0;
+
+    for (name, step) in &session.steps {
+        let prepared_query = session.prepare_query_for_validation(&step.query);
+
+        let result = match schema {
+            Some(s) if validator.supports_schema_validation() => {
+                validator.validate_with_schema(&prepared_query, s)
+            }
+            _ => validator.validate_syntax(&prepared_query),
+        };
+
+        match result {
+            Ok(r) if r.is_valid() => {
+                output.push_str(&format!("  \x1b[32m✓\x1b[0m {}\n", name));
+                valid_count += 1;
+            }
+            Ok(r) => {
+                let errs: Vec<_> = r.errors().collect();
+                output.push_str(&format!(
+                    "  \x1b[31m✗\x1b[0m {} ({} error(s))\n",
+                    name,
+                    errs.len()
+                ));
+                for err in errs {
+                    output.push_str(&format!(
+                        "      Line {}, Col {}: {}\n",
+                        err.line, err.column, err.message
+                    ));
+                }
+                error_count += 1;
+            }
+            Err(e) => {
+                output.push_str(&format!("  \x1b[33m?\x1b[0m {} (error: {})\n", name, e));
+            }
+        }
+    }
+
+    if error_count > 0 {
+        output.push_str(&format!(
+            "\nValidation: {} valid, {} with errors",
+            valid_count, error_count
+        ));
+    } else {
+        output.push_str(&format!("\n\x1b[32m✓\x1b[0m All {} steps valid", valid_count));
+    }
+
+    Ok(CommandResult::output(output))
+}
+
+/// Validate a loaded pack
+fn validate_loaded_pack(
+    loaded: &crate::context::LoadedPack,
+    schema: Option<&kql_panopticon_core::validation::Schema>,
+) -> Result<CommandResult> {
+    let mut output = String::new();
+    let mut has_errors = false;
+
+    let validation_type = if schema.is_some() { "schema" } else { "syntax" };
+    output.push_str(&format!(
+        "Validating pack '{}' ({} validation)...\n\n",
+        loaded.pack.name, validation_type
+    ));
+
+    let validator = match kql_panopticon_core::validation::KqlValidator::new() {
+        Ok(v) => Some(v),
+        Err(e) => {
+            output.push_str(&format!("Warning: Validator unavailable: {}\n\n", e));
+            None
+        }
+    };
+
+    for step in &loaded.pack.steps {
+        if let Some(q) = &step.query {
+            if let Some(ref v) = validator {
+                // Use schema-aware validation if available
+                let result = match schema {
+                    Some(s) if v.supports_schema_validation() => {
+                        v.validate_with_schema(q, s)
+                    }
+                    _ => v.validate_syntax(q),
+                };
+
+                match result {
+                    Ok(r) if r.is_valid() => {
+                        output.push_str(&format!("  \x1b[32m✓\x1b[0m {}\n", step.name));
+                    }
+                    Ok(r) => {
+                        has_errors = true;
+                        let errs: Vec<_> = r.errors().collect();
+                        output.push_str(&format!(
+                            "  \x1b[31m✗\x1b[0m {} ({} error(s))\n",
+                            step.name,
+                            errs.len()
+                        ));
+                        for err in errs {
+                            output.push_str(&format!(
+                                "      Line {}, Col {}: {}\n",
+                                err.line, err.column, err.message
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        output.push_str(&format!(
+                            "  \x1b[33m?\x1b[0m {} (error: {})\n",
+                            step.name, e
+                        ));
+                    }
+                }
+            } else {
+                output.push_str(&format!("  ? {} (validator unavailable)\n", step.name));
+            }
+        }
+    }
+
+    if has_errors {
+        output.push_str("\nValidation completed with errors");
+    } else if validator.is_some() {
+        output.push_str(&format!("\n\x1b[32m✓\x1b[0m All {} queries valid", loaded.pack.steps.len()));
+    }
+
+    Ok(CommandResult::output(output))
+}
+
+fn validate_single_query(
+    query: &str,
+    schema: Option<&kql_panopticon_core::validation::Schema>,
+) -> Result<CommandResult> {
+    let validator = match kql_panopticon_core::validation::KqlValidator::new() {
+        Ok(v) => v,
+        Err(e) => return Ok(CommandResult::error(format!("Validator unavailable: {}", e))),
+    };
+
+    // Use schema-aware validation if available
+    let result = match schema {
+        Some(s) if validator.supports_schema_validation() => {
+            validator.validate_with_schema(query, s)
+        }
+        _ => validator.validate_syntax(query),
+    };
+
+    let validation_type = if schema.is_some() { "schema" } else { "syntax" };
+
+    match result {
+        Ok(r) if r.is_valid() => {
+            Ok(CommandResult::message(format!(
+                "\x1b[32m✓\x1b[0m Query is valid ({} validation)",
+                validation_type
+            )))
+        }
+        Ok(r) => {
             let mut output = String::new();
-            let errs: Vec<_> = result.errors().collect();
-            output.push_str(&format!("Query has {} error(s):\n", errs.len()));
+            let errs: Vec<_> = r.errors().collect();
+            output.push_str(&format!(
+                "Query has {} error(s) ({} validation):\n",
+                errs.len(),
+                validation_type
+            ));
             for err in errs {
                 output.push_str(&format!(
                     "  Line {}, Col {}: {}\n",

@@ -1,11 +1,12 @@
 using Kusto.Language;
+using Kusto.Language.Symbols;
 using Kusto.Language.Syntax;
 
 namespace KqlLanguageFfi;
 
 /// <summary>
 /// KQL syntax classification service for syntax highlighting.
-/// Uses Microsoft's Kusto.Language library to classify tokens.
+/// Uses Microsoft's Kusto.Language library with semantic analysis to classify tokens.
 /// </summary>
 public static class ClassificationService
 {
@@ -18,11 +19,12 @@ public static class ClassificationService
     {
         try
         {
-            // Parse the query
-            var code = KustoCode.Parse(query);
+            // Parse AND analyze the query for semantic information
+            // This gives us access to ReferencedSymbol which tells us exactly what each identifier is
+            var code = KustoCode.ParseAndAnalyze(query);
             var spans = new List<ClassifiedSpan>();
 
-            // Walk the syntax tree and classify each token
+            // Walk the syntax tree and classify each token using semantic info
             ClassifyNode(code.Syntax, spans);
 
             return new ClassificationResult { Spans = spans };
@@ -154,45 +156,98 @@ public static class ClassificationService
     }
 
     /// <summary>
-    /// Classify an identifier or keyword based on parent context.
+    /// Classify an identifier or keyword based on semantic analysis.
+    /// Uses ReferencedSymbol from Kusto.Language's semantic analysis.
     /// </summary>
     private static string ClassifyIdentifierOrKeyword(SyntaxToken token, SyntaxElement? parent)
     {
         if (parent == null)
             return "Identifier";
 
-        // Get the kind from the token's classification context
-        var parentKind = parent.Kind;
+        // Walk up the tree to find the first element with a ReferencedSymbol
+        // Do this BEFORE keyword checks so function calls like count() get classified correctly
+        var current = parent;
+        while (current != null)
+        {
+            // Check for FunctionCallExpression (for function names like 'ago', 'count', etc.)
+            if (current is FunctionCallExpression funcCall && funcCall.ReferencedSymbol != null)
+            {
+                // Only return this for the function name itself, not for arguments
+                var nameExpr = funcCall.Name;
+                if (nameExpr != null && IsDescendantOrSelf(nameExpr, token))
+                {
+                    return ClassifySymbol(funcCall.ReferencedSymbol);
+                }
+            }
+
+            // Check for NameReference
+            if (current is NameReference nameRef && nameRef.ReferencedSymbol != null)
+            {
+                return ClassifySymbol(nameRef.ReferencedSymbol);
+            }
+
+            // Check for generic Expression with ReferencedSymbol
+            if (current is Expression expr && expr.ReferencedSymbol != null)
+            {
+                return ClassifySymbol(expr.ReferencedSymbol);
+            }
+
+            current = current.Parent;
+        }
 
         // Query operators (where, project, summarize, etc.)
+        // Check after semantic analysis so things like count() are classified as functions
         if (IsQueryOperatorKeyword(token))
             return "QueryOperator";
-
-        // Check parent type for context
-        switch (parent)
-        {
-            case NameReference nameRef:
-                // Could be table, column, or function depending on resolution
-                // Without semantic analysis, we use heuristics
-                if (IsLikelyTableName(nameRef))
-                    return "Table";
-                if (IsLikelyFunctionCall(nameRef))
-                    return "ScalarFunction";
-                return "Column";
-
-            case FunctionCallExpression funcCall:
-                // Check if this token is the function name
-                var funcName = funcCall.Name;
-                if (funcName is NameReference fnRef && fnRef.SimpleName == token.Text)
-                    return IsAggregateFunction(token.Text) ? "AggregateFunction" : "ScalarFunction";
-                break;
-        }
 
         // Keywords
         if (IsKeyword(token.Kind))
             return "Keyword";
 
         return "Identifier";
+    }
+
+    /// <summary>
+    /// Check if a token is contained within or is the same as the given element.
+    /// </summary>
+    private static bool IsDescendantOrSelf(SyntaxElement ancestor, SyntaxToken descendant)
+    {
+        var current = descendant as SyntaxElement;
+        while (current != null)
+        {
+            if (current == ancestor)
+                return true;
+            current = current.Parent;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Classify based on the resolved symbol type from semantic analysis.
+    /// </summary>
+    private static string ClassifySymbol(Symbol symbol)
+    {
+        return symbol switch
+        {
+            TableSymbol => "Table",
+            ColumnSymbol => "Column",
+            FunctionSymbol fs => fs.IsAggregate() ? "AggregateFunction" : "ScalarFunction",
+            VariableSymbol => "Variable",
+            ParameterSymbol => "Parameter",
+            DatabaseSymbol => "Database",
+            ClusterSymbol => "Cluster",
+            ScalarSymbol => "Literal",  // Built-in scalar types
+            _ => "Identifier"
+        };
+    }
+
+    /// <summary>
+    /// Check if a FunctionSymbol is an aggregate using GlobalState.
+    /// </summary>
+    private static bool IsAggregate(this FunctionSymbol fs)
+    {
+        // Use GlobalState's IsAggregateFunction which checks against the known aggregates collection
+        return GlobalState.Default.IsAggregateFunction(fs);
     }
 
     /// <summary>
@@ -218,54 +273,10 @@ public static class ClassificationService
             "mv-apply" or "make-series" or "lookup" or "evaluate" or
             "facet" or "sample" or "sample-distinct" or "reduce" or
             "serialize" or "invoke" or "fork" or "partition" or
-            "find" or "search" or "getschema" => true,
+            "find" or "search" or "getschema" or "as" or "by" or "on" or
+            "let" or "set" or "alias" or "declare" or "pattern" or
+            "restrict" or "access" => true,
             _ => false
         };
-    }
-
-    /// <summary>
-    /// Check if an aggregate function name.
-    /// </summary>
-    private static bool IsAggregateFunction(string name)
-    {
-        var lower = name.ToLowerInvariant();
-        return lower switch
-        {
-            "count" or "countif" or "dcount" or "dcountif" or "sum" or "sumif" or
-            "avg" or "avgif" or "min" or "minif" or "max" or "maxif" or
-            "stdev" or "stdevif" or "stdevp" or "variance" or "variancep" or
-            "make_list" or "make_set" or "make_bag" or "make_list_if" or
-            "make_set_if" or "make_bag_if" or "arg_max" or "arg_min" or
-            "any" or "anyif" or "take_any" or "take_anyif" or
-            "percentile" or "percentiles" or "percentile_array" or
-            "hll" or "hll_merge" or "tdigest" or "tdigest_merge" => true,
-            _ => false
-        };
-    }
-
-    /// <summary>
-    /// Heuristic: check if a name reference looks like a table name.
-    /// Tables are typically at the start of a query or after certain keywords.
-    /// </summary>
-    private static bool IsLikelyTableName(NameReference nameRef)
-    {
-        var parent = nameRef.Parent;
-
-        // At the start of a pipe expression
-        if (parent is PipeExpression)
-            return true;
-
-        // After 'from' or in table expressions
-        // This is a simplification - real resolution would require semantic analysis
-        return false;
-    }
-
-    /// <summary>
-    /// Heuristic: check if a name reference is followed by parentheses (function call).
-    /// </summary>
-    private static bool IsLikelyFunctionCall(NameReference nameRef)
-    {
-        var parent = nameRef.Parent;
-        return parent is FunctionCallExpression;
     }
 }
