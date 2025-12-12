@@ -36,18 +36,22 @@
 pub mod engine;
 pub mod executor;
 mod handlers;
+mod output;
 pub mod progress;
 pub mod registry;
 mod step;
 pub mod trace;
+pub mod types;
 
 // Re-exports
 pub use engine::{ExecutionEngine, ExecutionMode, ExecutionOptions};
-pub use executor::{
-    ExecutionStatus, PackExecutor, PackExecutorConfig, PackExecutorResult, StepResult, StepStatus,
-    WorkspaceResult,
-};
+pub use executor::PackExecutor;
+pub use output::{format_csv_value, write_csv_results};
 pub use progress::{ProgressSender, ProgressUpdate};
 pub use registry::{JobEvent, JobRegistry, JobResult, JobStatus, JobSummary};
 pub use step::{StepContext, StepOutput};
 pub use trace::{ExecutionTrace, StepTrace};
+pub use types::{
+    ExecutionStatus, PackExecutorConfig, PackExecutorResult, StepResult, StepStatus,
+    WorkspaceResult,
+};

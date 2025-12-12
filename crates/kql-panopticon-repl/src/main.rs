@@ -24,6 +24,8 @@ mod completer;
 mod context;
 mod editor;
 mod history;
+mod input_form;
+mod progress_display;
 mod prompt;
 mod session;
 mod state_graph;
@@ -47,6 +49,9 @@ const BANNER: &str = r#"
 "#;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Global left padding for all REPL output
+pub const OUTPUT_INDENT: &str = "    ";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -96,7 +101,8 @@ async fn main() -> Result<()> {
                     let mut ctx = ctx_clone.write().await;
                     ctx.complete_discovery(client, workspaces);
                     let _ = printer_clone.print(format!(
-                        "\r\x1b[K\x1b[32m✓\x1b[0m Discovered {} workspace(s)",
+                        "\r\x1b[K{}\x1b[32m✓\x1b[0m Discovered {} workspace(s)",
+                        OUTPUT_INDENT,
                         count
                     ));
                 }
@@ -104,7 +110,8 @@ async fn main() -> Result<()> {
                     let mut ctx = ctx_clone.write().await;
                     ctx.fail_discovery(e.to_string());
                     let _ = printer_clone.print(format!(
-                        "\r\x1b[K\x1b[31m✗\x1b[0m Discovery failed: {}",
+                        "\r\x1b[K{}\x1b[31m✗\x1b[0m Discovery failed: {}",
+                        OUTPUT_INDENT,
                         truncate_str(&e.to_string(), 50)
                     ));
                 }
@@ -124,27 +131,33 @@ async fn main() -> Result<()> {
                 // Execute command
                 match commands::execute(cmd.command, ctx.clone()).await {
                     Ok(CommandResult::Success(Some(msg))) => {
-                        println!("{}", msg);
+                        // Add indent to each line
+                        for line in msg.lines() {
+                            println!("{}{}", OUTPUT_INDENT, line);
+                        }
                     }
                     Ok(CommandResult::Success(None)) => {
                         // Silent success
                     }
                     Ok(CommandResult::Output(output)) => {
-                        println!("{}", output);
+                        // Add indent to each line
+                        for line in output.lines() {
+                            println!("{}{}", OUTPUT_INDENT, line);
+                        }
                     }
                     Ok(CommandResult::Clear) => {
                         // Clear screen
                         print!("\x1B[2J\x1B[1;1H");
                     }
                     Ok(CommandResult::Exit) => {
-                        println!("Goodbye!");
+                        println!("{}Goodbye!", OUTPUT_INDENT);
                         break;
                     }
                     Ok(CommandResult::Error(msg)) => {
-                        eprintln!("Error: {}", msg);
+                        eprintln!("{}Error: {}", OUTPUT_INDENT, msg);
                     }
                     Err(e) => {
-                        eprintln!("Error: {}", e);
+                        eprintln!("{}Error: {}", OUTPUT_INDENT, e);
                     }
                 }
             }
@@ -156,10 +169,10 @@ async fn main() -> Result<()> {
                 let _ = e.print();
             }
             ReadCommandOutput::ShlexError => {
-                eprintln!("Error: Invalid input syntax");
+                eprintln!("{}Error: Invalid input syntax", OUTPUT_INDENT);
             }
             ReadCommandOutput::ReedlineError(e) => {
-                eprintln!("Input error: {}", e);
+                eprintln!("{}Input error: {}", OUTPUT_INDENT, e);
             }
             ReadCommandOutput::CtrlC => {
                 // println!("Goodbye!");
@@ -167,7 +180,7 @@ async fn main() -> Result<()> {
             }
             ReadCommandOutput::CtrlD => {
                 // Exit on Ctrl+D
-                println!("Goodbye!");
+                println!("{}Goodbye!", OUTPUT_INDENT);
                 break;
             }
         }

@@ -119,7 +119,10 @@ pub enum Command {
     // === Execution ===
     /// Execute queries or packs
     Run {
-        /// Execute an ad-hoc query instead of loaded pack
+        /// Pack file path to execute directly (session unchanged)
+        path: Option<std::path::PathBuf>,
+
+        /// Execute an ad-hoc query instead of session/pack
         #[arg(long, short)]
         query: Option<String>,
 
@@ -130,6 +133,16 @@ pub enum Command {
         /// Run on all available workspaces
         #[arg(long)]
         all: bool,
+    },
+
+    /// Sample a single step with limited results
+    Sample {
+        /// Step name to sample
+        step: String,
+
+        /// Maximum rows to return
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
     },
 
     /// Validate loaded pack, session steps, or ad-hoc query
@@ -239,7 +252,8 @@ pub async fn execute(command: Command, ctx: SharedContext) -> Result<CommandResu
         Command::Pack { action } => pack::execute(action, ctx).await,
 
         // Execution
-        Command::Run { query, timespan, all } => run::execute(query, timespan, all, ctx).await,
+        Command::Run { path, query, timespan, all } => run::execute(path, query, timespan, all, ctx).await,
+        Command::Sample { step, limit } => run::sample(step, limit, ctx).await,
         Command::Validate { step, query } => run::validate(step, query, ctx).await,
         Command::Jobs { action } => jobs::execute(action, ctx).await,
         Command::Results { job_id } => jobs::results(job_id, ctx).await,

@@ -58,6 +58,7 @@ impl DynamicPrompt {
                 };
                 prompt.push(' ');
                 prompt.push_str(icon);
+                prompt.push(' ');
             }
         }
 

@@ -1,25 +1,33 @@
-//! Run command - execute packs or ad-hoc queries
+//! Run command - execute packs, sessions, or ad-hoc queries
 
 use crate::context::SharedContext;
 use crate::history::{ExecutionRecord, ExecutionSource, ExecutionStatusSummary, ExecutionSummary};
+use crate::input_form::{InputForm, InputFormResult};
+use crate::progress_display::{create_progress_channel, run_progress_display};
+use crate::session::{InputDef, PackSession};
 use super::CommandResult;
 use anyhow::Result;
-use kql_panopticon_core::{
-    ExecutionEngine, PackExecutor, PackExecutorConfig, StepStatus,
-};
+use kql_panopticon_core::pack::Pack;
+use kql_panopticon_core::{ExecutionEngine, PackExecutor, PackExecutorConfig, StepStatus};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-/// Execute loaded pack or ad-hoc query
+/// Execute loaded pack, session steps, pack file, or ad-hoc query
 pub async fn execute(
+    path: Option<PathBuf>,
     query: Option<String>,
     timespan: Option<String>,
     all: bool,
     ctx: SharedContext,
 ) -> Result<CommandResult> {
-    // Determine what to run
-    match query {
-        Some(q) => execute_adhoc_query(q, timespan, all, ctx).await,
-        None => execute_pack(all, ctx).await,
+    // Determine what to run based on arguments
+    match (query, path) {
+        // Ad-hoc query takes priority
+        (Some(q), _) => execute_adhoc_query(q, timespan, all, ctx).await,
+        // Direct pack file path
+        (None, Some(p)) => execute_pack_file(p, all, ctx).await,
+        // Session steps or loaded pack
+        (None, None) => execute_session_or_pack(all, ctx).await,
     }
 }
 
@@ -130,21 +138,107 @@ async fn execute_adhoc_query(
     Ok(CommandResult::output(result))
 }
 
-/// Execute loaded pack
-async fn execute_pack(all: bool, ctx: SharedContext) -> Result<CommandResult> {
-    // Get pack, client, workspaces
-    let (pack, pack_path, client, workspaces, output_dir) = {
+/// Execute a pack file directly (without loading it into session)
+async fn execute_pack_file(path: PathBuf, all: bool, ctx: SharedContext) -> Result<CommandResult> {
+    // Load pack from file
+    let pack = Pack::load_from_file(&path)
+        .map_err(|e| anyhow::anyhow!("Failed to load pack file: {}", e))?;
+
+    println!("Loaded pack: {}", pack.name);
+
+    // Collect inputs if required
+    let inputs = collect_pack_inputs(&pack)?;
+    if inputs.is_none() {
+        return Ok(CommandResult::message("Cancelled"));
+    }
+    let inputs = inputs.unwrap();
+
+    // Execute the pack
+    execute_pack_with_inputs(pack, Some(path), inputs, all, ctx).await
+}
+
+/// Execute session steps or loaded pack
+async fn execute_session_or_pack(all: bool, ctx: SharedContext) -> Result<CommandResult> {
+    // Check if session has steps
+    let session_has_steps = {
+        let ctx = ctx.read().await;
+        !ctx.pack_session().steps.is_empty()
+    };
+
+    if session_has_steps {
+        execute_session(all, ctx).await
+    } else {
+        execute_loaded_pack(all, ctx).await
+    }
+}
+
+/// Execute session steps
+async fn execute_session(all: bool, ctx: SharedContext) -> Result<CommandResult> {
+    // Get session and convert to pack
+    let (pack, inputs) = {
+        let ctx = ctx.read().await;
+        let session = ctx.pack_session();
+
+        // Collect required inputs
+        let required_inputs: Vec<InputDef> = session.inputs.values().cloned().collect();
+        let pack: Pack = session.into();
+
+        (pack, required_inputs)
+    };
+
+    // Prompt for inputs if any
+    let input_values = if inputs.is_empty() {
+        HashMap::new()
+    } else {
+        match collect_session_inputs(&inputs)? {
+            Some(values) => values,
+            None => return Ok(CommandResult::message("Cancelled")),
+        }
+    };
+
+    // Execute
+    execute_pack_with_inputs(pack, None, input_values, all, ctx).await
+}
+
+/// Execute a loaded pack (from 'pack load')
+async fn execute_loaded_pack(all: bool, ctx: SharedContext) -> Result<CommandResult> {
+    // Get pack from context
+    let (pack, pack_path) = {
+        let ctx = ctx.read().await;
+        let loaded = ctx.loaded_pack().ok_or_else(|| {
+            anyhow::anyhow!(
+                "No session steps defined and no pack loaded.\n\
+                Define steps with 'query <name> = \"<kql>\"' or load a pack with 'pack load <path>'"
+            )
+        })?;
+        (loaded.pack.clone(), loaded.path.clone())
+    };
+
+    // Collect inputs if required
+    let inputs = collect_pack_inputs(&pack)?;
+    if inputs.is_none() {
+        return Ok(CommandResult::message("Cancelled"));
+    }
+    let inputs = inputs.unwrap();
+
+    execute_pack_with_inputs(pack, Some(pack_path), inputs, all, ctx).await
+}
+
+/// Execute a pack with provided inputs
+async fn execute_pack_with_inputs(
+    pack: Pack,
+    pack_path: Option<PathBuf>,
+    inputs: HashMap<String, String>,
+    all: bool,
+    ctx: SharedContext,
+) -> Result<CommandResult> {
+    // Get client and workspaces
+    let (client, workspaces, output_dir) = {
         let mut ctx = ctx.write().await;
         if !ctx.is_initialized() {
             println!("Connecting to Azure...");
             ctx.initialize().await?;
         }
-
-        let loaded = ctx.loaded_pack().ok_or_else(|| {
-            anyhow::anyhow!("No pack loaded. Use 'pack load <path>'")
-        })?;
-        let pack = loaded.pack.clone();
-        let pack_path = loaded.path.clone();
 
         let client = ctx.client().cloned().ok_or_else(|| {
             anyhow::anyhow!("Not connected")
@@ -164,72 +258,59 @@ async fn execute_pack(all: bool, ctx: SharedContext) -> Result<CommandResult> {
 
         let output_dir = ctx.output_dir().clone();
 
-        (pack, pack_path, client, workspaces, output_dir)
+        (client, workspaces, output_dir)
     };
 
-    // Check for required inputs (for now, just warn)
-    let required = pack.required_inputs();
-    if !required.is_empty() {
-        let names: Vec<_> = required.iter().map(|i| i.name.as_str()).collect();
-        println!(
-            "Warning: Pack requires inputs: {}",
-            names.join(", ")
-        );
-        println!("Use --set to provide inputs (not yet implemented)\n");
-    }
-
     println!(
-        "Executing pack '{}' on {} workspace(s)...\n",
+        "Executing '{}' on {} workspace(s)...\n",
         pack.name,
         workspaces.len()
     );
 
-    // Create execution record
+    // Get workspace names for display and execution record
     let workspace_names: Vec<String> = workspaces.iter().map(|w| w.name.clone()).collect();
+    let display_workspace = workspace_names.first().cloned().unwrap_or_default();
+
+    // Create execution record
     let mut record = ExecutionRecord::new(
         ExecutionSource::Pack {
             name: pack.name.clone(),
-            path: pack_path.clone(),
-            inputs: HashMap::new(), // TODO: Add input support
+            path: pack_path.clone().unwrap_or_default(),
+            inputs: inputs.clone(),
         },
         workspace_names,
     );
 
     // Create executor and config
     let executor = PackExecutor::new(client);
-    let config = PackExecutorConfig::new(pack.clone())
-        .with_output_dir(output_dir.clone());
+    let mut config = PackExecutorConfig::new(pack.clone())
+        .with_output_dir(output_dir.clone())
+        .with_inputs(inputs);
+
+    if let Some(path) = &pack_path {
+        config = config.with_pack_path(path);
+    }
+
+    // Create progress channel
+    let (progress_sender, progress_receiver, _job_id) = create_progress_channel();
+
+    // Get step names for progress display
+    let step_names: Vec<String> = pack.steps.iter().map(|s| s.name.clone()).collect();
+
+    // Spawn progress display task
+    let progress_handle = tokio::spawn(run_progress_display(
+        step_names,
+        display_workspace,
+        progress_receiver,
+    ));
 
     // Execute
     let start = std::time::Instant::now();
-    let result = executor.execute(config, workspaces, None).await?;
+    let result = executor.execute(config, workspaces, Some(progress_sender)).await?;
     let duration = start.elapsed();
 
-    // Build output
-    let mut output = String::new();
-
-    // Show per-workspace results
-    for (ws_name, ws_result) in &result.workspace_results {
-        output.push_str(&format!("\n{}:\n", ws_name));
-        for (step_name, step_result) in &ws_result.step_results {
-            let status_icon = match step_result.status {
-                StepStatus::Success => "✓",
-                StepStatus::Failed => "✗",
-                StepStatus::Skipped => "○",
-                StepStatus::Pending | StepStatus::Running => "·",
-            };
-            output.push_str(&format!(
-                "  {} {} - {} rows ({}ms)\n",
-                status_icon,
-                step_name,
-                step_result.row_count.unwrap_or(0),
-                step_result.duration_ms
-            ));
-            if let Some(err) = &step_result.error {
-                output.push_str(&format!("    Error: {}\n", err));
-            }
-        }
-    }
+    // Wait for progress display to finish
+    let _ = progress_handle.await;
 
     // Calculate totals
     let total_rows: usize = result
@@ -270,17 +351,123 @@ async fn execute_pack(all: bool, ctx: SharedContext) -> Result<CommandResult> {
         ctx.record_execution(record);
     }
 
-    output.push_str(&format!(
+    // Build summary output
+    let mut output = format!(
         "\nCompleted in {:.2}s, {} total rows",
         duration.as_secs_f64(),
         total_rows
-    ));
+    );
 
     if let Some(path) = &result.output_dir {
         output.push_str(&format!("\nOutput: {}", path.display()));
     }
 
     Ok(CommandResult::output(output))
+}
+
+/// Sample a single step with limited results
+pub async fn sample(step_name: String, limit: usize, ctx: SharedContext) -> Result<CommandResult> {
+    // Get session and find the step
+    let (pack, inputs_needed) = {
+        let ctx = ctx.read().await;
+        let session = ctx.pack_session();
+
+        let step = session.get_step(&step_name).ok_or_else(|| {
+            anyhow::anyhow!("Step '{}' not found in session", step_name)
+        })?;
+
+        // Find inputs referenced by this step
+        let inputs_needed: Vec<InputDef> = step
+            .references_inputs
+            .iter()
+            .filter_map(|name| session.inputs.get(name).cloned())
+            .collect();
+
+        // Create a minimal pack with just this step (and dependencies)
+        let mut sample_session = PackSession::with_name(format!("Sample: {}", step_name));
+
+        // Add required inputs
+        for input in &inputs_needed {
+            sample_session.add_input(input.clone());
+        }
+
+        // Add the step with limit appended
+        let modified_query = format!("{} | take {}", step.query.trim_end(), limit);
+        let mut modified_step = step.clone();
+        modified_step.query = modified_query;
+        sample_session.add_step(modified_step);
+
+        // Add dependent steps
+        for dep_name in &step.depends_on {
+            if let Some(dep_step) = session.get_step(dep_name) {
+                sample_session.add_step(dep_step.clone());
+            }
+        }
+
+        let pack: Pack = (&sample_session).into();
+        (pack, inputs_needed)
+    };
+
+    // Prompt for inputs if any
+    let input_values = if inputs_needed.is_empty() {
+        HashMap::new()
+    } else {
+        match collect_session_inputs(&inputs_needed)? {
+            Some(values) => values,
+            None => return Ok(CommandResult::message("Cancelled")),
+        }
+    };
+
+    // Execute with sampling message
+    println!("Sampling step '{}' (limit: {} rows)...\n", step_name, limit);
+    execute_pack_with_inputs(pack, None, input_values, false, ctx).await
+}
+
+/// Collect input values from user using the input form
+fn collect_session_inputs(inputs: &[InputDef]) -> Result<Option<HashMap<String, String>>> {
+    if inputs.is_empty() {
+        return Ok(Some(HashMap::new()));
+    }
+
+    let form = InputForm::new("Enter Input Values", inputs);
+    match form.run()? {
+        InputFormResult::Submitted(values) => Ok(Some(values)),
+        InputFormResult::Cancelled => Ok(None),
+    }
+}
+
+/// Collect input values for a pack
+fn collect_pack_inputs(pack: &Pack) -> Result<Option<HashMap<String, String>>> {
+    let required_inputs: Vec<_> = pack.inputs.iter().filter(|i| i.required).collect();
+
+    if required_inputs.is_empty() {
+        // Use defaults for optional inputs
+        let defaults: HashMap<_, _> = pack
+            .inputs
+            .iter()
+            .filter_map(|i| i.default.as_ref().map(|d| (i.name.clone(), d.clone())))
+            .collect();
+        return Ok(Some(defaults));
+    }
+
+    // Convert to InputDef for the form
+    let input_defs: Vec<InputDef> = pack
+        .inputs
+        .iter()
+        .map(|i| InputDef {
+            name: i.name.clone(),
+            input_type: crate::session::InputType::String, // Pack doesn't have type info
+            description: i.description.clone(),
+            required: i.required,
+            default: i.default.clone(),
+        })
+        .collect();
+
+    let form = InputForm::new("Enter Input Values", &input_defs);
+    match form.run()? {
+        InputFormResult::Submitted(values) => Ok(Some(values)),
+        InputFormResult::Cancelled => Ok(None),
+    }
 }
 
 /// Validate a query, session steps, or loaded pack
@@ -321,7 +508,7 @@ pub async fn validate(
 /// Validate a single session step by name
 fn validate_session_step(
     step_name: &str,
-    session: &crate::session::PackSession,
+    session: &PackSession,
     schema: Option<&kql_panopticon_core::validation::Schema>,
 ) -> Result<CommandResult> {
     let step = session.get_step(step_name).ok_or_else(|| {
@@ -378,7 +565,7 @@ fn validate_session_step(
 
 /// Validate all session steps
 fn validate_session_steps(
-    session: &crate::session::PackSession,
+    session: &PackSession,
     schema: Option<&kql_panopticon_core::validation::Schema>,
 ) -> Result<CommandResult> {
     let validator = match kql_panopticon_core::validation::KqlValidator::new() {

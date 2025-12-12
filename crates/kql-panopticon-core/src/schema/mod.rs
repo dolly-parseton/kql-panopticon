@@ -26,6 +26,7 @@
 //! 3. Update the registry with discovered schemas
 
 mod capture;
+mod defaults;
 mod registry;
 mod types;
 

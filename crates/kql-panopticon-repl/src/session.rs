@@ -373,6 +373,71 @@ impl StepDef {
     }
 }
 
+// === Pack Conversion ===
+
+use kql_panopticon_core::pack::{Input as CoreInput, Pack, Step as CoreStep, StepType};
+use std::collections::HashMap as StdHashMap;
+
+/// Convert a PackSession to a Pack for execution
+impl From<&PackSession> for Pack {
+    fn from(session: &PackSession) -> Self {
+        Pack {
+            name: session
+                .name
+                .clone()
+                .unwrap_or_else(|| "Session".to_string()),
+            description: session.description.clone(),
+            version: None,
+            inputs: session
+                .inputs
+                .values()
+                .map(|input| CoreInput {
+                    name: input.name.clone(),
+                    label: None,
+                    description: input.description.clone(),
+                    default: input.default.clone(),
+                    required: input.required,
+                    example: Some(input.input_type.example_value(&input.name)),
+                })
+                .collect(),
+            steps: session
+                .steps
+                .values()
+                .map(|step| CoreStep {
+                    name: step.name.clone(),
+                    step_type: StepType::Kql,
+                    query: Some(step.query.clone()),
+                    timespan: None,
+                    request: None,
+                    response: None,
+                    source: None,
+                    depends_on: step.depends_on.clone(),
+                    when: None,
+                    foreach: None,
+                    batch_size: None,
+                    aggregate: None,
+                    on_empty: None,
+                    on_error: None,
+                    rate_limit: None,
+                    options: None,
+                    examples: StdHashMap::new(),
+                })
+                .collect(),
+            output: None,
+            secrets: None,
+            report: None,
+            scoring: None,
+        }
+    }
+}
+
+/// Convert an owned PackSession to a Pack
+impl From<PackSession> for Pack {
+    fn from(session: PackSession) -> Self {
+        Pack::from(&session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,5 +592,66 @@ mod tests {
         let prepared = session.prepare_query_for_validation(query);
 
         assert_eq!(prepared, query);
+    }
+
+    #[test]
+    fn test_pack_conversion() {
+        let mut session = PackSession::with_name("Test Pack");
+        session.description = Some("Test description".to_string());
+
+        // Add inputs
+        session.add_input(InputDef {
+            name: "target_ip".to_string(),
+            input_type: InputType::String,
+            description: Some("IP to investigate".to_string()),
+            required: true,
+            default: None,
+        });
+        session.add_input(InputDef {
+            name: "lookback".to_string(),
+            input_type: InputType::Timespan,
+            description: None,
+            required: false,
+            default: Some("P7D".to_string()),
+        });
+
+        // Add steps
+        session.add_step(StepDef::new("events", "SecurityEvent | take 100"));
+        session.add_step(StepDef::new(
+            "filtered",
+            "{{events}} | where IpAddress == '{{inputs.target_ip}}'",
+        ));
+
+        // Convert to Pack
+        let pack: Pack = (&session).into();
+
+        // Verify pack structure
+        assert_eq!(pack.name, "Test Pack");
+        assert_eq!(pack.description, Some("Test description".to_string()));
+
+        // Verify inputs
+        assert_eq!(pack.inputs.len(), 2);
+        assert_eq!(pack.inputs[0].name, "target_ip");
+        assert!(pack.inputs[0].required);
+        assert_eq!(pack.inputs[1].name, "lookback");
+        assert!(!pack.inputs[1].required);
+        assert_eq!(pack.inputs[1].default, Some("P7D".to_string()));
+
+        // Verify steps
+        assert_eq!(pack.steps.len(), 2);
+        assert_eq!(pack.steps[0].name, "events");
+        assert_eq!(pack.steps[0].query, Some("SecurityEvent | take 100".to_string()));
+        assert_eq!(pack.steps[1].name, "filtered");
+        assert_eq!(pack.steps[1].depends_on, vec!["events"]);
+    }
+
+    #[test]
+    fn test_pack_conversion_empty_session() {
+        let session = PackSession::new();
+        let pack: Pack = session.into();
+
+        assert_eq!(pack.name, "Session"); // Default name
+        assert!(pack.inputs.is_empty());
+        assert!(pack.steps.is_empty());
     }
 }

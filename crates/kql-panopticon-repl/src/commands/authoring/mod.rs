@@ -9,120 +9,18 @@
 //! - `edit` - Edit an existing input or step
 //! - `info` - Show session info
 
+mod helpers;
+mod validation;
+
+pub use validation::{get_validator, validate_kql_syntax, ValidationContext};
+
 use super::CommandResult;
 use crate::context::SharedContext;
 use crate::editor::{EditorConfig, EditorResult, KqlEditorMode};
-use crate::session::{InputDef, InputType, PackSession, StepDef};
+use crate::session::{InputDef, StepDef};
 use anyhow::Result;
-use kql_panopticon_core::schema::SchemaRegistry;
-use kql_panopticon_core::validation::{KqlValidator, Schema};
-use std::sync::{Arc, OnceLock};
-
-/// Global KQL validator instance (lazy initialized)
-static VALIDATOR: OnceLock<Option<KqlValidator>> = OnceLock::new();
-
-/// Get or initialize the KQL validator
-fn get_validator() -> Option<&'static KqlValidator> {
-    VALIDATOR
-        .get_or_init(|| KqlValidator::new().ok())
-        .as_ref()
-}
-
-/// Validation context for schema-aware validation
-pub struct ValidationContext<'a> {
-    pub session: &'a PackSession,
-    pub schema: Option<Schema>,
-    pub workspace_id: Option<&'a str>,
-}
-
-impl<'a> ValidationContext<'a> {
-    /// Create validation context from session only (syntax validation)
-    pub fn syntax_only(session: &'a PackSession) -> Self {
-        Self {
-            session,
-            schema: None,
-            workspace_id: None,
-        }
-    }
-
-    /// Create validation context with schema from registry
-    pub fn with_registry(
-        session: &'a PackSession,
-        registry: &SchemaRegistry,
-        workspace_id: Option<&'a str>,
-    ) -> Self {
-        let schema = registry.to_validation_schema(workspace_id);
-        Self {
-            session,
-            schema: Some(schema),
-            workspace_id,
-        }
-    }
-}
-
-/// Validate KQL syntax, substituting references with example values
-///
-/// Returns Ok(()) if valid, Err(error_message) if invalid.
-/// Uses schema-aware validation if schema is provided.
-fn validate_kql_syntax(query: &str, ctx: &ValidationContext) -> Result<(), String> {
-    let validator = match get_validator() {
-        Some(v) => v,
-        None => {
-            // Validator not available - skip validation with warning
-            // This allows usage without the native library
-            return Ok(());
-        }
-    };
-
-    // Substitute references with example values for validation
-    let prepared_query = ctx.session.prepare_query_for_validation(query);
-
-    // Use schema-aware validation if schema available
-    let validation_result = match &ctx.schema {
-        Some(schema) if validator.supports_schema_validation() => {
-            validator.validate_with_schema(&prepared_query, schema)
-        }
-        _ => validator.validate_syntax(&prepared_query),
-    };
-
-    match validation_result {
-        Ok(result) if result.is_valid() => Ok(()),
-        Ok(result) => {
-            // Build error message with diagnostics
-            let errors: Vec<_> = result.errors().collect();
-            let validation_type = if ctx.schema.is_some() { "schema" } else { "syntax" };
-            let mut msg = format!(
-                "\x1b[31m✗\x1b[0m Invalid KQL ({} validation, {} error(s)):",
-                validation_type,
-                errors.len()
-            );
-
-            for err in errors {
-                msg.push_str(&format!(
-                    "\n  Line {}, Col {}: {}",
-                    err.line, err.column, err.message
-                ));
-            }
-
-            // Add hint about substituted values if query had references
-            if query != prepared_query {
-                msg.push_str("\n\n  Note: References were substituted with example values for validation.");
-            }
-
-            // Add hint about schema validation
-            if ctx.schema.is_some() {
-                msg.push_str("\n  Schema-aware validation enabled for selected workspace.");
-            }
-
-            Err(msg)
-        }
-        Err(e) => {
-            // Validation itself failed - don't block, but warn
-            log::warn!("KQL validation error: {}", e);
-            Ok(())
-        }
-    }
-}
+use helpers::{infer_input_type, is_valid_identifier, truncate_value};
+use std::sync::Arc;
 
 /// Execute the `input` command
 pub async fn input(
@@ -183,15 +81,6 @@ pub async fn input(
                 name, name
             )))
         }
-    }
-}
-
-/// Truncate a value for display in trace
-fn truncate_value(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
     }
 }
 
@@ -711,79 +600,5 @@ pub async fn edit(name: String, shared_ctx: SharedContext) -> Result<CommandResu
             "No input or step named '{}' found",
             name
         )))
-    }
-}
-
-/// Check if a string is a valid identifier
-fn is_valid_identifier(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-
-    let mut chars = s.chars();
-
-    // First character must be a letter or underscore
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
-        _ => return false,
-    }
-
-    // Remaining characters must be alphanumeric or underscore
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// Infer input type from a string value
-fn infer_input_type(value: &str) -> InputType {
-    // Check for boolean
-    if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false") {
-        return InputType::Bool;
-    }
-
-    // Check for integer
-    if value.parse::<i64>().is_ok() {
-        return InputType::Int;
-    }
-
-    // Check for timespan (ISO 8601 duration)
-    if value.starts_with('P') && value.len() > 1 {
-        return InputType::Timespan;
-    }
-
-    // Check for datetime (ISO 8601)
-    if value.contains('T') && value.contains('-') {
-        return InputType::Datetime;
-    }
-
-    // Default to string
-    InputType::String
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_valid_identifier() {
-        assert!(is_valid_identifier("foo"));
-        assert!(is_valid_identifier("foo_bar"));
-        assert!(is_valid_identifier("foo123"));
-        assert!(is_valid_identifier("_foo"));
-
-        assert!(!is_valid_identifier(""));
-        assert!(!is_valid_identifier("123foo"));
-        assert!(!is_valid_identifier("foo-bar"));
-        assert!(!is_valid_identifier("foo bar"));
-    }
-
-    #[test]
-    fn test_infer_input_type() {
-        assert_eq!(infer_input_type("hello"), InputType::String);
-        assert_eq!(infer_input_type("123"), InputType::Int);
-        assert_eq!(infer_input_type("true"), InputType::Bool);
-        assert_eq!(infer_input_type("P7D"), InputType::Timespan);
-        assert_eq!(
-            infer_input_type("2024-01-15T10:30:00Z"),
-            InputType::Datetime
-        );
     }
 }

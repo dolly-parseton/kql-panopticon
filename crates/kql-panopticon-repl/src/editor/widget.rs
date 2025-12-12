@@ -7,7 +7,7 @@
 //! - Configurable syntax highlighting
 //! - Completion popup support
 
-use super::completion::{CompletionPopup, CompletionSource};
+use super::completion::{CompletionItem, CompletionPopup, CompletionSource};
 use super::highlight::Highlighter;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
@@ -424,7 +424,7 @@ impl<'a, H: Highlighter, C: CompletionSource> TuiEditor<'a, H, C> {
                 format!("{:>4} ", i + 1),
                 Style::default().fg(Color::DarkGray),
             );
-            display_lines.push(Line::from(vec![line_num_span, Span::raw("~")]));
+            display_lines.push(Line::from(vec![line_num_span, Span::styled("~", Style::default().fg(Color::Gray).add_modifier(Modifier::DIM))]));
         }
 
         // Render the content
@@ -605,11 +605,10 @@ impl<'a, H: Highlighter, C: CompletionSource> TuiEditor<'a, H, C> {
 
         if let Some(popup) = &self.completion_popup {
             if let Some(item) = popup.selected_item() {
-                // Get the text to insert - use label if insert_text is None or empty
-                let insert_text = item.insert_text.as_ref()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(&item.label);
-                debug_log(&format!("Selected item label: '{}'", item.label));
+                // Get the text to insert from the trait method
+                let insert_text = item.insert_text();
+                let label = item.label();
+                debug_log(&format!("Selected item label: '{}'", label));
                 debug_log(&format!("Insert text: '{}'", insert_text));
 
                 let (row, col) = self.textarea.cursor();

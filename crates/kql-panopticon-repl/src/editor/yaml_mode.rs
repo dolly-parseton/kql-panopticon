@@ -4,11 +4,84 @@
 //! - Simple YAML syntax highlighting
 //! - Type completion for input types
 
-use super::completion::{CompletionItem, CompletionItemKind, CompletionSource};
+use super::completion::{
+    CompletionDisplay, CompletionInsert, CompletionItem, CompletionKind, CompletionSource,
+};
 use super::highlight::YamlHighlighter;
 use super::widget::{EditorConfig, EditorResult, TuiEditor};
 use crate::session::{InputDef, InputType};
+use ratatui::style::Color;
 use std::io;
+
+// ============================================================================
+// YAML Completion Item
+// ============================================================================
+
+/// Completion item for YAML editing (types, booleans, etc.)
+pub struct YamlCompletionItem {
+    /// Display label
+    label: String,
+    /// Kind of completion
+    kind: CompletionKind,
+    /// Detail text
+    detail: Option<String>,
+    /// Character position where replacement should start
+    edit_start: usize,
+}
+
+impl YamlCompletionItem {
+    /// Create a type completion item
+    pub fn type_value(name: &str, description: &str, edit_start: usize) -> Self {
+        Self {
+            label: name.to_string(),
+            kind: CompletionKind::Type,
+            detail: Some(description.to_string()),
+            edit_start,
+        }
+    }
+
+    /// Create a boolean completion item
+    pub fn boolean(value: bool, edit_start: usize) -> Self {
+        Self {
+            label: value.to_string(),
+            kind: CompletionKind::Keyword,
+            detail: None,
+            edit_start,
+        }
+    }
+}
+
+impl CompletionDisplay for YamlCompletionItem {
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn icon(&self) -> &str {
+        self.kind.icon()
+    }
+
+    fn color(&self) -> Color {
+        self.kind.color()
+    }
+
+    fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+}
+
+impl CompletionInsert for YamlCompletionItem {
+    fn insert_text(&self) -> &str {
+        &self.label
+    }
+
+    fn edit_start(&self) -> usize {
+        self.edit_start
+    }
+}
+
+// ============================================================================
+// YAML Editor Mode
+// ============================================================================
 
 /// YAML editor mode configuration
 pub struct YamlEditorMode {
@@ -40,6 +113,10 @@ impl Default for YamlEditorMode {
     }
 }
 
+// ============================================================================
+// YAML Completion Source
+// ============================================================================
+
 /// YAML completion source (for input type values)
 pub struct YamlCompletionSource;
 
@@ -57,7 +134,7 @@ impl Default for YamlCompletionSource {
 }
 
 impl CompletionSource for YamlCompletionSource {
-    fn get_completions(&self, content: &str, cursor_offset: usize) -> Vec<CompletionItem> {
+    fn get_completions(&self, content: &str, cursor_offset: usize) -> Vec<Box<dyn CompletionItem>> {
         // Get the current line and position within it
         let before_cursor = &content[..cursor_offset];
         let current_line = before_cursor.lines().last().unwrap_or("");
@@ -67,16 +144,14 @@ impl CompletionSource for YamlCompletionSource {
             let colon_pos = current_line.find(':').unwrap_or(0);
             let value_part = &current_line[colon_pos + 1..];
             let prefix = value_part.trim();
+            let edit_start = cursor_offset - prefix.len();
 
             return INPUT_TYPES
                 .iter()
                 .filter(|(name, _)| prefix.is_empty() || name.starts_with(prefix))
-                .map(|(name, desc)| CompletionItem {
-                    label: (*name).to_string(),
-                    kind: CompletionItemKind::Keyword,
-                    detail: Some((*desc).to_string()),
-                    insert_text: Some((*name).to_string()),
-                    edit_start: cursor_offset - prefix.len(),
+                .map(|(name, desc)| {
+                    Box::new(YamlCompletionItem::type_value(name, desc, edit_start))
+                        as Box<dyn CompletionItem>
                 })
                 .collect();
         }
@@ -86,16 +161,13 @@ impl CompletionSource for YamlCompletionSource {
             let colon_pos = current_line.find(':').unwrap_or(0);
             let value_part = &current_line[colon_pos + 1..];
             let prefix = value_part.trim();
+            let edit_start = cursor_offset - prefix.len();
 
-            return ["true", "false"]
+            return [true, false]
                 .iter()
-                .filter(|v| prefix.is_empty() || v.starts_with(prefix))
-                .map(|v| CompletionItem {
-                    label: (*v).to_string(),
-                    kind: CompletionItemKind::Keyword,
-                    detail: None,
-                    insert_text: Some((*v).to_string()),
-                    edit_start: cursor_offset - prefix.len(),
+                .filter(|v| prefix.is_empty() || v.to_string().starts_with(prefix))
+                .map(|&v| {
+                    Box::new(YamlCompletionItem::boolean(v, edit_start)) as Box<dyn CompletionItem>
                 })
                 .collect();
         }
@@ -112,6 +184,10 @@ const INPUT_TYPES: &[(&str, &str)] = &[
     ("datetime", "Date and time"),
     ("timespan", "Duration (e.g., P7D, PT1H)"),
 ];
+
+// ============================================================================
+// YAML Parsing Utilities
+// ============================================================================
 
 /// Parse an input definition from YAML content
 pub fn parse_input_yaml(content: &str) -> Result<InputDef, String> {
@@ -245,7 +321,10 @@ default: null
         let input = result.unwrap();
         assert_eq!(input.name, "threat_ip");
         assert_eq!(input.input_type, InputType::String);
-        assert_eq!(input.description, Some("IP address to investigate".to_string()));
+        assert_eq!(
+            input.description,
+            Some("IP address to investigate".to_string())
+        );
         assert!(input.required);
         assert!(input.default.is_none());
     }
@@ -340,9 +419,9 @@ required: true
         let items = source.get_completions(content, cursor);
 
         assert!(!items.is_empty());
-        assert!(items.iter().any(|i| i.label == "string"));
-        assert!(items.iter().any(|i| i.label == "int"));
-        assert!(items.iter().any(|i| i.label == "bool"));
+        assert!(items.iter().any(|i| i.label() == "string"));
+        assert!(items.iter().any(|i| i.label() == "int"));
+        assert!(items.iter().any(|i| i.label() == "bool"));
     }
 
     #[test]
@@ -354,7 +433,22 @@ required: true
         let items = source.get_completions(content, cursor);
 
         assert!(!items.is_empty());
-        assert!(items.iter().any(|i| i.label == "true"));
-        assert!(items.iter().any(|i| i.label == "false"));
+        assert!(items.iter().any(|i| i.label() == "true"));
+        assert!(items.iter().any(|i| i.label() == "false"));
+    }
+
+    #[test]
+    fn test_yaml_completion_item_edit_start() {
+        let source = YamlCompletionSource::new();
+        let content = "type: str";
+        let cursor = content.len();
+
+        let items = source.get_completions(content, cursor);
+
+        // All items should have edit_start pointing to where "str" starts
+        let expected_edit_start = "type: ".len();
+        for item in &items {
+            assert_eq!(item.edit_start(), expected_edit_start);
+        }
     }
 }

@@ -33,7 +33,10 @@ mod kql_mode;
 mod widget;
 pub mod yaml_mode;
 
-pub use completion::{CompletionItem, CompletionItemKind, CompletionPopup, CompletionSource};
+pub use completion::{
+    CompletionDisplay, CompletionInsert, CompletionItem, CompletionKind, CompletionPopup,
+    CompletionSource, SimpleCompletionItem,
+};
 pub use highlight::{HighlightSpan, Highlighter, KqlHighlighter, YamlHighlighter};
 pub use kql_mode::KqlEditorMode;
 pub use widget::{EditorConfig, EditorResult, TuiEditor};

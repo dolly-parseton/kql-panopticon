@@ -40,13 +40,15 @@ public static class CompletionService
 
             foreach (var item in completionInfo.Items)
             {
-                // Get the text to insert
-                string? insertText = null;
                 int editStart = completionInfo.EditStart;
 
-                if (item.AfterText != null && item.AfterText != item.DisplayText)
+                // Use MatchText for insertion if available (e.g., "ago" for label "ago(timespan)")
+                // Otherwise fall back to DisplayText
+                // Note: AfterText is for incremental completion and not suitable for full replacement
+                string? insertText = null;
+                if (!string.IsNullOrEmpty(item.MatchText) && item.MatchText != item.DisplayText)
                 {
-                    insertText = item.AfterText;
+                    insertText = item.MatchText;
                 }
 
                 items.Add(new CompletionItemResponse
