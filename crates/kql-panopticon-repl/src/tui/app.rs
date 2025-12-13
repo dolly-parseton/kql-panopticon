@@ -265,9 +265,16 @@ impl App {
                 self.history_next();
             }
 
-            // Tab: Focus first block (for now, completion comes later)
-            (_, KeyCode::Tab) => {
+            // Tab: Focus last block (for now, completion comes later)
+            (KeyModifiers::NONE, KeyCode::Tab) => {
                 if let Some(block) = self.state.output.last() {
+                    self.state.focus = Focus::Block(block.id);
+                }
+            }
+
+            // Shift+Tab: Focus first block
+            (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+                if let Some(block) = self.state.output.first() {
                     self.state.focus = Focus::Block(block.id);
                 }
             }
@@ -286,38 +293,73 @@ impl App {
 
     /// Handle key event when a block has focus
     fn handle_block_key(&mut self, key: KeyEvent, block_id: BlockId) {
-        match key.code {
+        match (key.modifiers, key.code) {
             // Escape: Return to input
-            KeyCode::Esc => {
+            (_, KeyCode::Esc) => {
                 self.state.focus = Focus::Input;
             }
 
-            // Minimize toggle
-            KeyCode::Char('-') | KeyCode::Char('m') => {
+            // Enter: Expand if minimized, otherwise return to input
+            (_, KeyCode::Enter) => {
+                if let Some(block) = self.state.output.iter_mut().find(|b| b.id == block_id) {
+                    if block.minimized {
+                        block.minimized = false;
+                    } else {
+                        self.state.focus = Focus::Input;
+                    }
+                }
+            }
+
+            // Space: Toggle minimize
+            (_, KeyCode::Char(' ')) => {
                 if let Some(block) = self.state.output.iter_mut().find(|b| b.id == block_id) {
                     block.minimized = !block.minimized;
                 }
             }
 
-            // Remove block
-            KeyCode::Char('x') | KeyCode::Char('d') | KeyCode::Delete => {
-                self.state.output.retain(|b| b.id != block_id);
-                self.state.focus = Focus::Input;
+            // Minimize toggle (- or m)
+            (_, KeyCode::Char('-')) | (_, KeyCode::Char('m')) => {
+                if let Some(block) = self.state.output.iter_mut().find(|b| b.id == block_id) {
+                    block.minimized = !block.minimized;
+                }
             }
 
-            // Navigate to previous block
-            KeyCode::Up | KeyCode::Char('k') => {
+            // Remove block (x, d, or Delete)
+            (_, KeyCode::Char('x')) | (_, KeyCode::Char('d')) | (_, KeyCode::Delete) => {
+                let idx = self.state.output.iter().position(|b| b.id == block_id);
+                self.state.output.retain(|b| b.id != block_id);
+                // Focus next block or input
+                if let Some(idx) = idx {
+                    if idx < self.state.output.len() {
+                        self.state.focus = Focus::Block(self.state.output[idx].id);
+                    } else if idx > 0 && !self.state.output.is_empty() {
+                        self.state.focus = Focus::Block(self.state.output[idx - 1].id);
+                    } else {
+                        self.state.focus = Focus::Input;
+                    }
+                } else {
+                    self.state.focus = Focus::Input;
+                }
+            }
+
+            // Navigate to previous block (Up, k)
+            (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
                 self.focus_prev_block(block_id);
             }
 
-            // Navigate to next block
-            KeyCode::Down | KeyCode::Char('j') => {
+            // Navigate to next block (Down, j)
+            (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
                 self.focus_next_block(block_id);
             }
 
-            // Tab: Return to input
-            KeyCode::Tab => {
-                self.state.focus = Focus::Input;
+            // Tab: Focus next block or return to input
+            (KeyModifiers::NONE, KeyCode::Tab) => {
+                self.focus_next_block(block_id);
+            }
+
+            // Shift+Tab: Focus previous block or return to input
+            (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+                self.focus_prev_block(block_id);
             }
 
             _ => {}
@@ -467,17 +509,20 @@ impl App {
         }
     }
 
-    /// Focus the previous block
+    /// Focus the previous block (or return to input if at first block)
     fn focus_prev_block(&mut self, current_id: BlockId) {
         let current_idx = self.state.output.iter().position(|b| b.id == current_id);
         if let Some(idx) = current_idx {
             if idx > 0 {
                 self.state.focus = Focus::Block(self.state.output[idx - 1].id);
+            } else {
+                // At first block, return to input
+                self.state.focus = Focus::Input;
             }
         }
     }
 
-    /// Focus the next block
+    /// Focus the next block (or return to input if at last block)
     fn focus_next_block(&mut self, current_id: BlockId) {
         let current_idx = self.state.output.iter().position(|b| b.id == current_id);
         if let Some(idx) = current_idx {
