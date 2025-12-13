@@ -5,9 +5,16 @@
 //!
 //! Enable with `cargo run --features tui`
 
+mod active_job;
 mod app;
 mod event;
+pub mod events;
 pub mod ui;
+mod undo_stack;
+pub mod widgets;
+
+pub use active_job::{ActiveJob, ActiveJobManager, CancellationToken};
+pub use undo_stack::{UndoStack, UndoableOperation};
 
 pub use app::App;
 
@@ -36,7 +43,7 @@ pub async fn run() -> Result<()> {
     let ctx = create_shared_context();
 
     // Create and run app
-    let mut app = App::new(ctx);
+    let mut app = App::new(ctx).await;
     let result = app.run(&mut terminal).await;
 
     // Restore terminal

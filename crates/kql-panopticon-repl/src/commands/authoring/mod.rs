@@ -1,12 +1,11 @@
 //! Pack authoring commands
 //!
 //! Commands for interactively building investigation packs:
-//! - `input` - Define user input parameters
-//! - `query` - Define query steps
+//! - `input` - Define or edit user input parameters
+//! - `query` - Define or edit query steps
 //! - `inputs` - List defined inputs
 //! - `steps` - List defined steps
 //! - `remove` - Remove an input or step
-//! - `edit` - Edit an existing input or step
 //! - `info` - Show session info
 
 mod helpers;
@@ -16,11 +15,9 @@ pub use validation::{get_validator, validate_kql_syntax, ValidationContext};
 
 use super::CommandResult;
 use crate::context::SharedContext;
-use crate::editor::{EditorConfig, EditorResult, KqlEditorMode};
 use crate::session::{InputDef, StepDef};
 use anyhow::Result;
 use helpers::{infer_input_type, is_valid_identifier, truncate_value};
-use std::sync::Arc;
 
 /// Execute the `input` command
 pub async fn input(
@@ -72,14 +69,14 @@ pub async fn input(
             )))
         }
         None => {
-            // YAML pack editor for inputs is planned for Phase 7
-            // For now, require inline value syntax
-            Ok(CommandResult::error(format!(
-                "Usage: input {} = \"<value>\"\n\n\
-                 The YAML input editor is not yet implemented.\n\
-                 Use inline syntax: input {} = \"default_value\"",
-                name, name
-            )))
+            // No value provided - open input definition form
+            // Check if editing an existing input
+            let existing = {
+                let ctx = shared_ctx.read().await;
+                ctx.pack_session().inputs.get(&name).cloned()
+            };
+
+            Ok(CommandResult::DefineInput { name, existing })
         }
     }
 }
@@ -174,93 +171,24 @@ pub async fn query(
             Ok(CommandResult::message(response))
         }
         None => {
-            // Open KQL editor
-            // Get session and schema context for reference/column completion
-            let (session, schema) = {
+            // Check if editing an existing step
+            let existing = {
                 let ctx = shared_ctx.read().await;
-                let session = Arc::new(ctx.pack_session().clone());
-                let workspace_id = ctx.selected_workspaces().first().map(|ws| ws.workspace_id.as_str());
-                let schema = ctx.schema_registry().map(|r| r.to_validation_schema(workspace_id));
-                (session, schema)
+                ctx.pack_session().steps.get(&name).cloned()
             };
 
-            let config = EditorConfig::kql(&name);
-            let mode = match schema {
-                Some(s) => KqlEditorMode::with_schema(session, s),
-                None => KqlEditorMode::with_session(session),
-            };
-            let result = mode.run(config);
-
-            match result {
-                Ok(EditorResult::Saved(query_str)) => {
-                    // Acquire lock and add the step
-                    let mut ctx = shared_ctx.write().await;
-
-                    // Validate references before adding
-                    if let Err(errors) = ctx.pack_session().validate_references(&query_str) {
-                        let hints: Vec<String> = errors
-                            .iter()
-                            .map(|e| {
-                                if e.contains("Unknown input") {
-                                    format!("{}\n  Hint: Define with 'input <name>'", e)
-                                } else if e.contains("Unknown step") {
-                                    format!("{}\n  Hint: Define with 'query <name>'", e)
-                                } else {
-                                    e.clone()
-                                }
-                            })
-                            .collect();
-
-                        return Ok(CommandResult::error(format!(
-                            "\x1b[31m✗\x1b[0m Invalid references:\n  {}",
-                            hints.join("\n  ")
-                        )));
-                    }
-
-                    // Build validation context
-                    let workspace_id = ctx.selected_workspaces().first().map(|ws| ws.workspace_id.as_str());
-                    let validation_ctx = match ctx.schema_registry() {
-                        Some(registry) => ValidationContext::with_registry(
-                            ctx.pack_session(),
-                            registry,
-                            workspace_id,
-                        ),
-                        None => ValidationContext::syntax_only(ctx.pack_session()),
-                    };
-
-                    // Validate KQL
-                    if let Err(validation_error) = validate_kql_syntax(&query_str, &validation_ctx) {
-                        return Ok(CommandResult::error(validation_error));
-                    }
-
-                    // Create step
-                    let step = StepDef::new(name.clone(), query_str.clone());
-                    let deps = step.depends_on.clone();
-                    let refs = step.references_inputs.clone();
-
-                    // Commit state
-                    let command = format!("query {} = \"{}\"", name, truncate_value(&query_str, 30));
-                    ctx.commit_state(command);
-                    ctx.pack_session_mut().add_step(step);
-
-                    // Build response
-                    let mut response = format!("\x1b[32m✓\x1b[0m Step defined: {}", name);
-                    if !refs.is_empty() {
-                        response.push_str(&format!("\n  refs: [{}]", refs.join(", ")));
-                    }
-                    if !deps.is_empty() {
-                        response.push_str(&format!("\n  depends: [{}]", deps.join(", ")));
-                    }
-
-                    Ok(CommandResult::message(response))
+            match existing {
+                Some(step) => {
+                    // Edit existing step
+                    Ok(CommandResult::EditStep {
+                        name,
+                        content: step.query,
+                    })
                 }
-                Ok(EditorResult::Cancelled) => {
-                    Ok(CommandResult::message("Cancelled"))
+                None => {
+                    // Create new step
+                    Ok(CommandResult::NewStep { name })
                 }
-                Err(e) => Ok(CommandResult::error(format!(
-                    "\x1b[31m✗\x1b[0m Editor error: {}",
-                    e
-                ))),
             }
         }
     }
@@ -477,128 +405,3 @@ pub async fn new_session(name: Option<String>, ctx: SharedContext) -> Result<Com
     Ok(CommandResult::message(msg))
 }
 
-/// Execute the `edit` command - edit an existing input or step
-pub async fn edit(name: String, shared_ctx: SharedContext) -> Result<CommandResult> {
-    // Check if name exists and what type it is
-    let (is_input, is_step, existing_input, existing_step) = {
-        let ctx = shared_ctx.read().await;
-        let session = ctx.pack_session();
-        (
-            session.inputs.contains_key(&name),
-            session.steps.contains_key(&name),
-            session.inputs.get(&name).cloned(),
-            session.steps.get(&name).cloned(),
-        )
-    };
-
-    if is_input {
-        // YAML pack editor for inputs is planned for Phase 7
-        // For now, inputs can only be edited by removing and re-adding
-        let input_def = existing_input.unwrap();
-        Ok(CommandResult::error(format!(
-            "Editing inputs via YAML is not yet implemented.\n\n\
-             Current value of '{}': \"{}\"\n\n\
-             To modify, use:\n\
-             1. remove {}\n\
-             2. input {} = \"new_value\"",
-            name,
-            input_def.default.as_deref().unwrap_or("(no default)"),
-            name,
-            name
-        )))
-    } else if is_step {
-        // Edit step with KQL editor
-        let step_def = existing_step.unwrap();
-
-        // Get session and schema context for reference/column completion
-        let (session, schema) = {
-            let ctx = shared_ctx.read().await;
-            let session = Arc::new(ctx.pack_session().clone());
-            let workspace_id = ctx.selected_workspaces().first().map(|ws| ws.workspace_id.as_str());
-            let schema = ctx.schema_registry().map(|r| r.to_validation_schema(workspace_id));
-            (session, schema)
-        };
-
-        let config = EditorConfig::kql(&name).with_content(&step_def.query);
-        let mode = match schema {
-            Some(s) => KqlEditorMode::with_schema(session, s),
-            None => KqlEditorMode::with_session(session),
-        };
-        let result = mode.run(config);
-
-        match result {
-            Ok(EditorResult::Saved(query_str)) => {
-                let mut ctx = shared_ctx.write().await;
-
-                // Validate references
-                if let Err(errors) = ctx.pack_session().validate_references(&query_str) {
-                    let hints: Vec<String> = errors
-                        .iter()
-                        .map(|e| {
-                            if e.contains("Unknown input") {
-                                format!("{}\n  Hint: Define with 'input <name>'", e)
-                            } else if e.contains("Unknown step") {
-                                format!("{}\n  Hint: Define with 'query <name>'", e)
-                            } else {
-                                e.clone()
-                            }
-                        })
-                        .collect();
-
-                    return Ok(CommandResult::error(format!(
-                        "\x1b[31m✗\x1b[0m Invalid references:\n  {}",
-                        hints.join("\n  ")
-                    )));
-                }
-
-                // Build validation context
-                let workspace_id = ctx.selected_workspaces().first().map(|ws| ws.workspace_id.as_str());
-                let validation_ctx = match ctx.schema_registry() {
-                    Some(registry) => ValidationContext::with_registry(
-                        ctx.pack_session(),
-                        registry,
-                        workspace_id,
-                    ),
-                    None => ValidationContext::syntax_only(ctx.pack_session()),
-                };
-
-                // Validate KQL
-                if let Err(validation_error) = validate_kql_syntax(&query_str, &validation_ctx) {
-                    return Ok(CommandResult::error(validation_error));
-                }
-
-                // Commit state
-                ctx.commit_state(format!("edit {}", name));
-
-                // Update the step
-                let step = StepDef::new(name.clone(), query_str);
-                let deps = step.depends_on.clone();
-                let refs = step.references_inputs.clone();
-                ctx.pack_session_mut().add_step(step);
-
-                // Build response
-                let mut response = format!("\x1b[32m✓\x1b[0m Step updated: {}", name);
-                if !refs.is_empty() {
-                    response.push_str(&format!("\n  refs: [{}]", refs.join(", ")));
-                }
-                if !deps.is_empty() {
-                    response.push_str(&format!("\n  depends: [{}]", deps.join(", ")));
-                }
-
-                Ok(CommandResult::message(response))
-            }
-            Ok(EditorResult::Cancelled) => {
-                Ok(CommandResult::message("Cancelled"))
-            }
-            Err(e) => Ok(CommandResult::error(format!(
-                "\x1b[31m✗\x1b[0m Editor error: {}",
-                e
-            ))),
-        }
-    } else {
-        Ok(CommandResult::error(format!(
-            "No input or step named '{}' found",
-            name
-        )))
-    }
-}

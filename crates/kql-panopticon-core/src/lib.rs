@@ -68,6 +68,9 @@ pub use execution::{
 // Re-export report types
 pub use report::{ReportGenerator, generate_report};
 
+// Re-export event types
+pub use events::{ContextEvent, EventLog, EventLogConfig, TimestampedEvent, SessionEndReason};
+
 // Re-export schema types
 pub use schema::{
     SchemaRegistry, SchemaType, TableInfo, ColumnDef, WorkspaceSchema,
@@ -76,6 +79,7 @@ pub use schema::{
 // Module declarations
 pub mod client;
 pub mod error;
+pub mod events;
 pub mod execution;
 pub mod pack;
 pub mod report;

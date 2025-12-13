@@ -127,21 +127,14 @@ async fn select(name: Option<String>, all: bool, ctx: SharedContext) -> Result<C
             Ok(CommandResult::message(format!("Selected workspace: {}", name)))
         }
         None => {
-            // In future: open TUI selector popup
-            // For now, list workspaces and ask for name
+            // Check if workspaces are available
             let workspaces = ctx.available_workspaces();
             if workspaces.is_empty() {
-                return Ok(CommandResult::error("No workspaces available"));
+                return Ok(CommandResult::error("No workspaces available. Run 'workspace list' first."));
             }
 
-            let mut output = String::new();
-            output.push_str("Available workspaces:\n");
-            for (i, ws) in workspaces.iter().enumerate() {
-                output.push_str(&format!("  {}. {} ({})\n", i + 1, ws.name, ws.subscription_name));
-            }
-            output.push_str("\nUse 'workspace select <name>' to select one");
-
-            Ok(CommandResult::output(output))
+            // Return SelectWorkspaces to open the TUI selector widget
+            Ok(CommandResult::SelectWorkspaces)
         }
     }
 }

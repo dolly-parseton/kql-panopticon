@@ -12,18 +12,23 @@ use crate::history::{ExecutionHistory, ExecutionRecord};
 use crate::session::PackSession;
 use crate::state_graph::{StateGraph, StateId};
 use anyhow::Result;
+use kql_panopticon_core::events::{ContextEvent, EventLog, EventLogConfig};
 use kql_panopticon_core::schema::{SchemaRegistry, SchemaStatus, get_schema_status};
 use kql_panopticon_core::{Client, JobRegistry, Pack, Workspace};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 /// Shared REPL context accessible across command handlers
 pub type SharedContext = Arc<RwLock<ReplContext>>;
 
 /// Main REPL context holding all session state
 pub struct ReplContext {
+    /// Unique session identifier
+    session_id: Uuid,
+
     /// Azure client for API calls
     client: Option<Client>,
 
@@ -66,6 +71,12 @@ pub struct ReplContext {
 
     /// Schema capture errors by workspace ID
     schema_capture_errors: std::collections::HashMap<String, String>,
+
+    /// Whether we're running in TUI mode
+    tui_mode: bool,
+
+    /// Event log for debugging and auditing
+    event_log: EventLog,
 }
 
 /// A loaded pack with its source path
@@ -88,7 +99,25 @@ impl ReplContext {
             .map_err(|e| log::warn!("Failed to load schema registry: {}", e))
             .ok();
 
+        // Configure event log
+        let log_dir = dirs::home_dir()
+            .map(|h| h.join(".kql-panopticon").join("logs"))
+            .unwrap_or_else(|| PathBuf::from("./logs"));
+
+        let event_log_config = EventLogConfig {
+            max_memory_events: 10000,
+            auto_flush: false,
+            log_directory: Some(log_dir.to_string_lossy().to_string()),
+        };
+
+        let session_id = Uuid::new_v4();
+        let mut event_log = EventLog::with_config(event_log_config);
+
+        // Log session start
+        event_log.log(ContextEvent::SessionStarted { session_id });
+
         Self {
+            session_id,
             client: None,
             available_workspaces: Vec::new(),
             selected_workspaces: Vec::new(),
@@ -103,7 +132,74 @@ impl ReplContext {
             schema_registry,
             schema_capturing: HashSet::new(),
             schema_capture_errors: std::collections::HashMap::new(),
+            tui_mode: false,
+            event_log,
         }
+    }
+
+    /// Get the session ID
+    pub fn session_id(&self) -> Uuid {
+        self.session_id
+    }
+
+    // ========== Event Logging Methods ==========
+
+    /// Log a context event
+    pub fn log_event(&mut self, event: ContextEvent) {
+        log::debug!("Event: {}", event.description());
+        self.event_log.log(event);
+    }
+
+    /// Get recent events (for debugging)
+    pub fn recent_events(&self, count: usize) -> &[kql_panopticon_core::events::TimestampedEvent] {
+        self.event_log.recent(count)
+    }
+
+    /// Get all error events
+    pub fn error_events(&self) -> Vec<&kql_panopticon_core::events::TimestampedEvent> {
+        self.event_log.errors()
+    }
+
+    /// Flush events to file and return count written
+    pub fn flush_events(&mut self) -> Result<usize> {
+        use kql_panopticon_core::SessionEndReason;
+
+        // Log session end before flushing
+        self.event_log.log(ContextEvent::SessionEnded {
+            session_id: self.session_id,
+            reason: SessionEndReason::UserQuit,
+        });
+
+        // Generate filename with session ID
+        let log_dir = dirs::home_dir()
+            .map(|h| h.join(".kql-panopticon").join("logs"))
+            .unwrap_or_else(|| PathBuf::from("./logs"));
+
+        let filename = log_dir.join(format!(
+            "session_{}.jsonl",
+            self.session_id.to_string().split('-').next().unwrap_or("unknown")
+        ));
+
+        let count = self.event_log.flush_to_file(&filename)?;
+        log::info!("Flushed {} events to {:?}", count, filename);
+        Ok(count)
+    }
+
+    /// Get event log statistics
+    pub fn event_stats(&self) -> (usize, usize) {
+        let total = self.event_log.total_count();
+        let errors = self.event_log.errors().len();
+        (total, errors)
+    }
+
+    /// Check if running in TUI mode
+    pub fn is_tui_mode(&self) -> bool {
+        self.tui_mode
+    }
+
+    /// Set TUI mode (called by TUI app on startup)
+    pub fn set_tui_mode(&mut self, enabled: bool) {
+        self.tui_mode = enabled;
     }
 
     /// Mark discovery as started
@@ -200,6 +296,16 @@ impl ReplContext {
     /// Clear workspace selection
     pub fn clear_workspace_selection(&mut self) {
         self.selected_workspaces.clear();
+    }
+
+    /// Select workspaces by their IDs
+    pub fn set_workspace_selection_by_ids(&mut self, ids: &[String]) {
+        self.selected_workspaces = self
+            .available_workspaces
+            .iter()
+            .filter(|w| ids.contains(&w.workspace_id))
+            .cloned()
+            .collect();
     }
 
     // ========== Schema Registry Methods ==========

@@ -22,6 +22,7 @@
 
 mod commands;
 mod completer;
+mod completion;
 mod context;
 mod editor;
 mod history;
@@ -184,6 +185,56 @@ async fn run_legacy_repl() -> Result<()> {
                     }
                     Ok(CommandResult::Error(msg)) => {
                         eprintln!("Error: {}", msg);
+                    }
+                    Ok(CommandResult::EditStep { name, .. }) => {
+                        println!("Edit step '{}' requires TUI mode (--tui)", name);
+                    }
+                    Ok(CommandResult::NewStep { name }) => {
+                        println!("Create step '{}' requires TUI mode (--tui)", name);
+                    }
+                    Ok(CommandResult::EditInput { name, .. }) => {
+                        println!("Edit input '{}' requires TUI mode (--tui)", name);
+                    }
+                    Ok(CommandResult::InputsRequired { .. }) => {
+                        // Should not happen in non-TUI mode (context flag not set)
+                        println!("Input collection requires TUI mode (--tui)");
+                    }
+                    Ok(CommandResult::DefineInput { name, .. }) => {
+                        println!("Define input '{}' requires TUI mode (--tui)", name);
+                    }
+                    Ok(CommandResult::ViewResults { name, columns, rows }) => {
+                        // In non-TUI mode, print results as a simple table
+                        println!("Peek at '{}':", name);
+                        println!("{}", columns.join(" | "));
+                        println!("{}", "-".repeat(columns.iter().map(|c| c.len() + 3).sum::<usize>().saturating_sub(3)));
+                        for row in rows.iter().take(20) {
+                            println!("{}", row.join(" | "));
+                        }
+                        if rows.len() > 20 {
+                            println!("... and {} more rows (use --tui for full view)", rows.len() - 20);
+                        }
+                    }
+                    Ok(CommandResult::ExecutionComplete { summary, step_results }) => {
+                        // In non-TUI mode, print summary and basic step info
+                        println!("{}", summary);
+                        for step in step_results {
+                            if step.success {
+                                println!("  {} - {} rows", step.name, step.row_count);
+                            } else {
+                                let err = step.error.unwrap_or_else(|| "Unknown error".to_string());
+                                println!("  {} - FAILED: {}", step.name, err);
+                            }
+                        }
+                    }
+                    Ok(CommandResult::StartExecution { .. }) => {
+                        // Should not happen in non-TUI mode
+                        println!("Execution requires TUI mode (--tui)");
+                    }
+                    Ok(CommandResult::SelectWorkspaces) => {
+                        // In non-TUI mode, show help message
+                        println!("Interactive workspace selection requires TUI mode.");
+                        println!("Use 'workspace select <name>' to select a specific workspace,");
+                        println!("or 'workspace select --all' to select all workspaces.");
                     }
                     Err(e) => {
                         eprintln!("Error: {}", e);

@@ -32,7 +32,7 @@
 //! - Visual error feedback
 //! - Ctrl+Enter to submit from any field
 
-mod field;
+pub mod field;
 mod validation;
 mod widget;
 

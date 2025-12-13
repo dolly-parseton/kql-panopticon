@@ -11,9 +11,12 @@ pub mod run;
 pub mod workspace;
 
 use crate::context::SharedContext;
+use crate::session::InputDef;
 use crate::validator::join_continuation_lines;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use kql_panopticon_core::pack::Pack;
+use std::path::PathBuf;
 
 /// Root command enum for the REPL
 #[derive(Debug, Parser)]
@@ -28,21 +31,21 @@ pub struct ReplCommand {
 #[command(disable_help_subcommand = true)]
 pub enum Command {
     // === Pack Authoring Commands ===
-    /// Define a user input parameter
+    /// Define or edit a user input parameter
     #[command(alias = "in")]
     Input {
         /// Input name
         name: String,
-        /// Value (opens editor if omitted)
+        /// Value (opens editor if omitted; edits existing if name exists)
         #[arg(value_parser = parse_assignment, trailing_var_arg = true, num_args = 0..)]
         value: Vec<String>,
     },
 
-    /// Define a query step
+    /// Define or edit a query step
     Query {
         /// Step name
         name: String,
-        /// KQL query (opens editor if omitted)
+        /// KQL query (opens editor if omitted; edits existing if name exists)
         #[arg(value_parser = parse_assignment, trailing_var_arg = true, num_args = 0..)]
         kql: Vec<String>,
     },
@@ -61,12 +64,6 @@ pub enum Command {
     #[command(alias = "rm")]
     Remove {
         /// Name of input or step to remove
-        name: String,
-    },
-
-    /// Edit an existing input or step
-    Edit {
-        /// Name of input or step to edit
         name: String,
     },
 
@@ -174,6 +171,15 @@ pub enum Command {
         count: usize,
     },
 
+    /// Peek at step results from last execution
+    Peek {
+        /// Step name to peek at
+        step: String,
+        /// Job ID or short prefix (default: last execution)
+        #[arg(long)]
+        job: Option<String>,
+    },
+
     /// Show or set configuration
     Config {
         /// Configuration key to show or set
@@ -238,7 +244,6 @@ pub async fn execute(command: Command, ctx: SharedContext) -> Result<CommandResu
         Command::Inputs => authoring::list_inputs(ctx).await,
         Command::Steps { show } => authoring::list_steps(show, ctx).await,
         Command::Remove { name } => authoring::remove(name, ctx).await,
-        Command::Edit { name } => authoring::edit(name, ctx).await,
         Command::Info => authoring::info(ctx).await,
         Command::New { name } => authoring::new_session(name, ctx).await,
 
@@ -258,6 +263,7 @@ pub async fn execute(command: Command, ctx: SharedContext) -> Result<CommandResu
         Command::Jobs { action } => jobs::execute(action, ctx).await,
         Command::Results { job_id } => jobs::results(job_id, ctx).await,
         Command::History { count } => history(count, ctx).await,
+        Command::Peek { step, job } => peek_step_results(step, job, ctx).await,
         Command::Config { key, value } => config(key, value, ctx).await,
         Command::Status => status(ctx).await,
         Command::Clear => {
@@ -267,6 +273,17 @@ pub async fn execute(command: Command, ctx: SharedContext) -> Result<CommandResu
         Command::Help { command } => help(command),
         Command::Exit => Ok(CommandResult::Exit),
     }
+}
+
+/// Context needed to continue execution after input collection
+#[derive(Debug, Clone)]
+pub struct ExecutionContext {
+    /// The pack to execute
+    pub pack: Pack,
+    /// Path to the pack file (if loaded from file)
+    pub pack_path: Option<PathBuf>,
+    /// Whether to run on all workspaces
+    pub all_workspaces: bool,
 }
 
 /// Result of command execution
@@ -282,6 +299,68 @@ pub enum CommandResult {
     Exit,
     /// Error occurred
     Error(String),
+    /// Open KQL editor for a step
+    EditStep { name: String, content: String },
+    /// Open KQL editor to create a new step
+    NewStep { name: String },
+    /// Open YAML editor for an input (future)
+    EditInput { name: String, content: String },
+    /// View step results in a results widget
+    ViewResults {
+        name: String,
+        columns: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
+    /// Inputs required before execution can proceed (TUI mode)
+    InputsRequired {
+        /// Input definitions to collect
+        inputs: Vec<InputDef>,
+        /// Context needed to continue execution
+        context: ExecutionContext,
+    },
+    /// Open input definition form (for `input <name>` without value)
+    DefineInput {
+        /// Input name
+        name: String,
+        /// Existing input definition if editing
+        existing: Option<InputDef>,
+    },
+    /// Execution completed with results (TUI mode)
+    ExecutionComplete {
+        /// Summary text
+        summary: String,
+        /// Step results with their data
+        step_results: Vec<StepResultData>,
+    },
+    /// Start execution immediately with provided inputs (TUI mode)
+    ///
+    /// Unlike InputsRequired, this doesn't show a form - execution starts immediately.
+    /// Used when all inputs are already available (e.g., defaults or no inputs needed).
+    StartExecution {
+        /// Context for execution
+        context: ExecutionContext,
+        /// Pre-filled input values
+        inputs: std::collections::HashMap<String, String>,
+    },
+    /// Open workspace selector widget (TUI mode)
+    SelectWorkspaces,
+}
+
+/// Data for a single step's execution result
+#[derive(Debug, Clone)]
+pub struct StepResultData {
+    /// Step name
+    pub name: String,
+    /// Column headers
+    pub columns: Vec<String>,
+    /// Data rows
+    pub rows: Vec<Vec<String>>,
+    /// Row count
+    pub row_count: usize,
+    /// Whether step succeeded
+    pub success: bool,
+    /// Error message if failed
+    pub error: Option<String>,
 }
 
 impl CommandResult {
@@ -342,6 +421,163 @@ async fn history(count: usize, ctx: SharedContext) -> Result<CommandResult> {
     }
 
     Ok(CommandResult::output(output))
+}
+
+/// Peek at step results from an execution
+async fn peek_step_results(step: String, job_id: Option<String>, ctx: SharedContext) -> Result<CommandResult> {
+    let ctx = ctx.read().await;
+    let history = ctx.history();
+
+    // Find the execution record
+    let record = match &job_id {
+        Some(id) => history.get_by_prefix(id),
+        None => history.last(),
+    };
+
+    let record = match record {
+        Some(r) => r,
+        None => {
+            return Ok(CommandResult::error(if job_id.is_some() {
+                "Execution not found"
+            } else {
+                "No executions in history"
+            }));
+        }
+    };
+
+    // Get output path
+    let output_path = match &record.output_path {
+        Some(p) => p,
+        None => return Ok(CommandResult::error("No output path for this execution")),
+    };
+
+    // Find CSV file for the step - search recursively in output_path
+    // Structure: output_path/{subscription}/{workspace}/{timestamp}/{step}.csv
+    let step_csv = format!("{}.csv", step);
+    let csv_path = find_step_csv(output_path, &step_csv).await?;
+
+    match csv_path {
+        Some(path) => {
+            // Read and parse CSV
+            let content = tokio::fs::read_to_string(&path).await
+                .map_err(|e| anyhow::anyhow!("Failed to read results: {}", e))?;
+
+            let (columns, rows) = parse_csv(&content);
+
+            if rows.is_empty() {
+                return Ok(CommandResult::message(format!(
+                    "Step '{}' has no results",
+                    step
+                )));
+            }
+
+            Ok(CommandResult::ViewResults {
+                name: step,
+                columns,
+                rows,
+            })
+        }
+        None => Ok(CommandResult::error(format!(
+            "No results found for step '{}' in execution {}",
+            step,
+            record.short_id()
+        ))),
+    }
+}
+
+/// Find a step CSV file recursively within the output directory
+async fn find_step_csv(base_path: &std::path::Path, filename: &str) -> Result<Option<std::path::PathBuf>> {
+    use tokio::fs;
+
+    if !base_path.exists() {
+        return Ok(None);
+    }
+
+    // Check if the file is directly in the base path
+    let direct_path = base_path.join(filename);
+    if direct_path.exists() {
+        return Ok(Some(direct_path));
+    }
+
+    // Otherwise search subdirectories (BFS)
+    let mut dirs_to_check = vec![base_path.to_path_buf()];
+
+    while let Some(dir) = dirs_to_check.pop() {
+        let mut entries = match fs::read_dir(&dir).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs_to_check.push(path.clone());
+            } else if path.file_name().map(|n| n == filename).unwrap_or(false) {
+                return Ok(Some(path));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Parse CSV content into columns and rows
+fn parse_csv(content: &str) -> (Vec<String>, Vec<Vec<String>>) {
+    let mut lines = content.lines();
+
+    // First line is header
+    let columns: Vec<String> = match lines.next() {
+        Some(header) => header.split(',').map(|s| s.trim().to_string()).collect(),
+        None => return (vec![], vec![]),
+    };
+
+    // Remaining lines are data
+    let rows: Vec<Vec<String>> = lines
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            // Simple CSV parsing - handles basic cases
+            // For quoted fields with commas, we'd need more sophisticated parsing
+            parse_csv_line(line)
+        })
+        .collect();
+
+    (columns, rows)
+}
+
+/// Parse a single CSV line, handling quoted fields
+fn parse_csv_line(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if in_quotes => {
+                // Check for escaped quote ("")
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    current.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            }
+            '"' if !in_quotes => {
+                in_quotes = true;
+            }
+            ',' if !in_quotes => {
+                fields.push(current.trim().to_string());
+                current = String::new();
+            }
+            _ => {
+                current.push(c);
+            }
+        }
+    }
+
+    // Don't forget the last field
+    fields.push(current.trim().to_string());
+    fields
 }
 
 /// Show or set configuration
@@ -460,6 +696,7 @@ Jobs & Results:
   jobs                         View running/completed jobs
   results [job_id]             View execution results
   history                      Show execution history
+  peek <step> [--job <id>]     Peek at step results from last execution
 
 Other:
   config                       Show/set configuration

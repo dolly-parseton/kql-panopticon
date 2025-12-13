@@ -199,6 +199,16 @@ impl PackSession {
         self.steps.get(name)
     }
 
+    /// Update a step's query content
+    pub fn update_step_query(&mut self, name: &str, query: &str) -> bool {
+        if let Some(step) = self.steps.get_mut(name) {
+            step.query = query.to_string();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Check if a name exists (as input or step)
     #[allow(dead_code)]
     pub fn name_exists(&self, name: &str) -> bool {

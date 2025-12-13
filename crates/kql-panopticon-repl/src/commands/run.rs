@@ -4,13 +4,22 @@ use crate::context::SharedContext;
 use crate::history::{ExecutionRecord, ExecutionSource, ExecutionStatusSummary, ExecutionSummary};
 use crate::input_form::{InputForm, InputFormResult};
 use crate::progress_display::{create_progress_channel, run_progress_display};
+#[cfg(feature = "tui")]
+use crate::progress_display::run_tui_progress_forwarder;
+#[cfg(feature = "tui")]
+use crate::tui::events::TuiEventSender;
 use crate::session::{InputDef, PackSession};
-use super::CommandResult;
+use super::{CommandResult, ExecutionContext, StepResultData};
 use anyhow::Result;
 use kql_panopticon_core::pack::Pack;
 use kql_panopticon_core::{ExecutionEngine, PackExecutor, PackExecutorConfig, StepStatus};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Check if we're running in TUI mode by checking context flag
+async fn is_tui_mode(ctx: &SharedContext) -> bool {
+    ctx.read().await.is_tui_mode()
+}
 
 /// Execute loaded pack, session steps, pack file, or ad-hoc query
 pub async fn execute(
@@ -138,14 +147,48 @@ async fn execute_pack_file(path: PathBuf, all: bool, ctx: SharedContext) -> Resu
     let pack = Pack::load_from_file(&path)
         .map_err(|e| anyhow::anyhow!("Failed to load pack file: {}", e))?;
 
-    // Pack name will be shown in output when execution completes
+    // Check if we need to collect inputs
+    let required_inputs: Vec<_> = pack.inputs.iter().filter(|i| i.required && i.default.is_none()).collect();
 
-    // Collect inputs if required
-    let inputs = collect_pack_inputs(&pack)?;
-    if inputs.is_none() {
-        return Ok(CommandResult::message("Cancelled"));
+    // In TUI mode, return InputsRequired if there are any inputs (let user review/modify)
+    if is_tui_mode(&ctx).await && !pack.inputs.is_empty() {
+        let input_defs: Vec<InputDef> = pack
+            .inputs
+            .iter()
+            .map(|i| InputDef {
+                name: i.name.clone(),
+                input_type: crate::session::InputType::String,
+                description: i.description.clone(),
+                required: i.required,
+                default: i.default.clone(),
+            })
+            .collect();
+
+        return Ok(CommandResult::InputsRequired {
+            inputs: input_defs,
+            context: ExecutionContext {
+                pack: pack.clone(),
+                pack_path: Some(path),
+                all_workspaces: all,
+            },
+        });
     }
-    let inputs = inputs.unwrap();
+
+    // Non-TUI mode: collect inputs if required, otherwise use defaults
+    let inputs = if pack.inputs.is_empty() {
+        HashMap::new()
+    } else if !required_inputs.is_empty() {
+        // Has required inputs without defaults - must prompt
+        match collect_pack_inputs(&pack)? {
+            Some(values) => values,
+            None => return Ok(CommandResult::message("Cancelled")),
+        }
+    } else {
+        // All inputs have defaults - use them
+        pack.inputs.iter()
+            .filter_map(|i| i.default.as_ref().map(|d| (i.name.clone(), d.clone())))
+            .collect()
+    };
 
     // Execute the pack
     execute_pack_with_inputs(pack, Some(path), inputs, all, ctx).await
@@ -180,14 +223,35 @@ async fn execute_session(all: bool, ctx: SharedContext) -> Result<CommandResult>
         (pack, required_inputs)
     };
 
-    // Prompt for inputs if any
+    // Check if we need to collect inputs
+    let needs_input = inputs.iter().any(|i| i.required && i.default.is_none());
+
+    // In TUI mode, return InputsRequired if there are any inputs (let user review/modify)
+    if is_tui_mode(&ctx).await && !inputs.is_empty() {
+        return Ok(CommandResult::InputsRequired {
+            inputs: inputs.clone(),
+            context: ExecutionContext {
+                pack: pack.clone(),
+                pack_path: None,
+                all_workspaces: all,
+            },
+        });
+    }
+
+    // Non-TUI mode: prompt for inputs if required, otherwise use defaults
     let input_values = if inputs.is_empty() {
         HashMap::new()
-    } else {
+    } else if needs_input {
+        // Has required inputs without defaults - must prompt
         match collect_session_inputs(&inputs)? {
             Some(values) => values,
             None => return Ok(CommandResult::message("Cancelled")),
         }
+    } else {
+        // All inputs have defaults - use them
+        inputs.iter()
+            .filter_map(|i| i.default.as_ref().map(|d| (i.name.clone(), d.clone())))
+            .collect()
     };
 
     // Execute
@@ -208,18 +272,56 @@ async fn execute_loaded_pack(all: bool, ctx: SharedContext) -> Result<CommandRes
         (loaded.pack.clone(), loaded.path.clone())
     };
 
-    // Collect inputs if required
-    let inputs = collect_pack_inputs(&pack)?;
-    if inputs.is_none() {
-        return Ok(CommandResult::message("Cancelled"));
+    // Check if we need to collect inputs
+    let required_inputs: Vec<_> = pack.inputs.iter().filter(|i| i.required && i.default.is_none()).collect();
+
+    // In TUI mode, return InputsRequired if there are any inputs (let user review/modify)
+    if is_tui_mode(&ctx).await && !pack.inputs.is_empty() {
+        let input_defs: Vec<InputDef> = pack
+            .inputs
+            .iter()
+            .map(|i| InputDef {
+                name: i.name.clone(),
+                input_type: crate::session::InputType::String,
+                description: i.description.clone(),
+                required: i.required,
+                default: i.default.clone(),
+            })
+            .collect();
+
+        return Ok(CommandResult::InputsRequired {
+            inputs: input_defs,
+            context: ExecutionContext {
+                pack: pack.clone(),
+                pack_path: Some(pack_path),
+                all_workspaces: all,
+            },
+        });
     }
-    let inputs = inputs.unwrap();
+
+    // Non-TUI mode: collect inputs if required, otherwise use defaults
+    let inputs = if pack.inputs.is_empty() {
+        HashMap::new()
+    } else if !required_inputs.is_empty() {
+        // Has required inputs without defaults - must prompt
+        match collect_pack_inputs(&pack)? {
+            Some(values) => values,
+            None => return Ok(CommandResult::message("Cancelled")),
+        }
+    } else {
+        // All inputs have defaults - use them
+        pack.inputs.iter()
+            .filter_map(|i| i.default.as_ref().map(|d| (i.name.clone(), d.clone())))
+            .collect()
+    };
 
     execute_pack_with_inputs(pack, Some(pack_path), inputs, all, ctx).await
 }
 
 /// Execute a pack with provided inputs
-async fn execute_pack_with_inputs(
+///
+/// This is public so it can be called from the TUI after collecting inputs.
+pub async fn execute_pack_with_inputs(
     pack: Pack,
     pack_path: Option<PathBuf>,
     inputs: HashMap<String, String>,
@@ -291,7 +393,7 @@ async fn execute_pack_with_inputs(
     // Get step names for progress display
     let step_names: Vec<String> = pack.steps.iter().map(|s| s.name.clone()).collect();
 
-    // Spawn progress display task
+    // Spawn progress collection task
     let progress_handle = tokio::spawn(run_progress_display(
         step_names,
         display_workspace,
@@ -303,8 +405,8 @@ async fn execute_pack_with_inputs(
     let result = executor.execute(config, workspaces, Some(progress_sender)).await?;
     let duration = start.elapsed();
 
-    // Wait for progress display to finish
-    let _ = progress_handle.await;
+    // Wait for progress collection to finish
+    let progress_output = progress_handle.await.unwrap_or_default();
 
     // Calculate totals
     let total_rows: usize = result
@@ -345,18 +447,264 @@ async fn execute_pack_with_inputs(
         ctx.record_execution(record);
     }
 
-    // Build summary output
-    let mut output = format!(
-        "\nCompleted in {:.2}s, {} total rows",
+    // Build summary text
+    let mut summary = progress_output.to_string();
+    summary.push_str(&format!(
+        "\n\nCompleted in {:.2}s, {} total rows",
         duration.as_secs_f64(),
         total_rows
-    );
+    ));
 
     if let Some(path) = &result.output_dir {
-        output.push_str(&format!("\nOutput: {}", path.display()));
+        summary.push_str(&format!("\nOutput: {}", path.display()));
     }
 
-    Ok(CommandResult::output(output))
+    // In TUI mode, return ExecutionComplete with step results
+    if is_tui_mode(&ctx).await {
+        let step_results = extract_step_results(&result);
+        return Ok(CommandResult::ExecutionComplete {
+            summary,
+            step_results,
+        });
+    }
+
+    Ok(CommandResult::output(summary))
+}
+
+/// Spawn pack execution in the background with real-time TUI progress updates
+///
+/// This function returns immediately with the job ID and step names.
+/// Execution runs in the background, sending progress events via the TuiEventSender.
+///
+/// # Returns
+/// - `job_id`: UUID for tracking the job
+/// - `step_names`: Names of steps in execution order (for RunProgressWidget)
+#[cfg(feature = "tui")]
+pub async fn spawn_tui_execution(
+    pack: Pack,
+    pack_path: Option<PathBuf>,
+    inputs: HashMap<String, String>,
+    all: bool,
+    ctx: SharedContext,
+    event_tx: TuiEventSender,
+) -> Result<(uuid::Uuid, Vec<String>)> {
+    // Get client and workspaces
+    let (client, workspaces, output_dir) = {
+        let mut ctx = ctx.write().await;
+        if !ctx.is_initialized() {
+            ctx.initialize().await?;
+        }
+
+        let client = ctx.client().cloned().ok_or_else(|| {
+            anyhow::anyhow!("Not connected")
+        })?;
+
+        let workspaces = if all {
+            ctx.available_workspaces().to_vec()
+        } else {
+            let selected = ctx.selected_workspaces().to_vec();
+            if selected.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "No workspace selected. Use 'workspace select <name>' or 'run --all'"
+                ));
+            }
+            selected
+        };
+
+        let output_dir = ctx.output_dir().clone();
+        (client, workspaces, output_dir)
+    };
+
+    // Get step names for progress display
+    let step_names: Vec<String> = pack.steps.iter().map(|s| s.name.clone()).collect();
+    let pack_name = pack.name.clone();
+
+    // Create progress channel
+    let (progress_sender, progress_receiver, job_id) = create_progress_channel();
+
+    // Get workspace names for execution record
+    let workspace_names: Vec<String> = workspaces.iter().map(|w| w.name.clone()).collect();
+
+    // Create execution record early for history
+    let record_source = ExecutionSource::Pack {
+        name: pack_name.clone(),
+        path: pack_path.clone().unwrap_or_default(),
+        inputs: inputs.clone(),
+    };
+
+    // Clone what we need for the background task
+    let bg_step_names = step_names.clone();
+    let bg_pack_name = pack_name.clone();
+    let bg_ctx = ctx.clone();
+
+    // Spawn background execution task
+    tokio::spawn(async move {
+        // Spawn progress forwarder task
+        let forwarder_handle = tokio::spawn(run_tui_progress_forwarder(
+            bg_pack_name.clone(),
+            bg_step_names.clone(),
+            progress_receiver,
+            event_tx,
+        ));
+
+        // Create executor and config
+        let executor = PackExecutor::new(client);
+        let mut config = PackExecutorConfig::new(pack.clone())
+            .with_output_dir(output_dir.clone())
+            .with_inputs(inputs);
+
+        if let Some(path) = &pack_path {
+            config = config.with_pack_path(path);
+        }
+
+        // Execute
+        let start = std::time::Instant::now();
+        let result = executor.execute(config, workspaces, Some(progress_sender)).await;
+        let duration = start.elapsed();
+
+        // Wait for forwarder to finish
+        let _ = forwarder_handle.await;
+
+        // Record execution in history
+        match result {
+            Ok(exec_result) => {
+                let total_rows: usize = exec_result
+                    .workspace_results
+                    .values()
+                    .flat_map(|ws| ws.step_results.values())
+                    .filter_map(|s| s.row_count)
+                    .sum();
+
+                let steps_completed = exec_result
+                    .workspace_results
+                    .values()
+                    .flat_map(|ws| ws.step_results.values())
+                    .filter(|s| matches!(s.status, StepStatus::Success))
+                    .count();
+
+                let steps_failed = exec_result
+                    .workspace_results
+                    .values()
+                    .flat_map(|ws| ws.step_results.values())
+                    .filter(|s| matches!(s.status, StepStatus::Failed))
+                    .count();
+
+                let mut record = ExecutionRecord::new(record_source, workspace_names);
+                record.result = ExecutionSummary {
+                    status: ExecutionStatusSummary::from(exec_result.status),
+                    duration_ms: duration.as_millis() as u64,
+                    total_rows,
+                    steps_completed,
+                    steps_failed,
+                    steps_skipped: 0,
+                };
+                record.output_path = exec_result.output_dir;
+
+                // Save to history
+                {
+                    let mut ctx = bg_ctx.write().await;
+                    ctx.record_execution(record);
+                }
+            }
+            Err(e) => {
+                log::error!("Pack execution failed: {}", e);
+            }
+        }
+    });
+
+    Ok((job_id, step_names))
+}
+
+/// Extract step results from execution result for display
+fn extract_step_results(result: &kql_panopticon_core::PackExecutorResult) -> Vec<StepResultData> {
+    let mut step_results = Vec::new();
+
+    // Collect from first workspace (for now, just show first workspace results)
+    if let Some((_ws_id, ws_result)) = result.workspace_results.iter().next() {
+        for (step_name, step_result) in &ws_result.step_results {
+            let success = matches!(step_result.status, StepStatus::Success);
+            let row_count = step_result.row_count.unwrap_or(0);
+
+            // Get the actual data rows if available
+            let (columns, rows) = if let Some(data) = ws_result.step_data.get(step_name) {
+                extract_columns_and_rows(data)
+            } else {
+                (Vec::new(), Vec::new())
+            };
+
+            let error = if !success {
+                ws_result.failure_reason.clone()
+            } else {
+                None
+            };
+
+            step_results.push(StepResultData {
+                name: step_name.clone(),
+                columns,
+                rows,
+                row_count,
+                success,
+                error,
+            });
+        }
+    }
+
+    // Sort by step name for consistent ordering
+    step_results.sort_by(|a, b| a.name.cmp(&b.name));
+    step_results
+}
+
+/// Extract column headers and rows from JSON data
+fn extract_columns_and_rows(data: &[serde_json::Value]) -> (Vec<String>, Vec<Vec<String>>) {
+    if data.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    // Get columns from first row's keys
+    let columns: Vec<String> = if let Some(first_row) = data.first() {
+        if let Some(obj) = first_row.as_object() {
+            obj.keys().cloned().collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    if columns.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    // Extract rows
+    let rows: Vec<Vec<String>> = data
+        .iter()
+        .map(|row| {
+            columns
+                .iter()
+                .map(|col| {
+                    row.get(col)
+                        .map(|v| json_value_to_string(v))
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .collect();
+
+    (columns, rows)
+}
+
+/// Convert a JSON value to a display string
+fn json_value_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "".to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => {
+            format!("[{} items]", arr.len())
+        }
+        serde_json::Value::Object(_) => "{...}".to_string(),
+    }
 }
 
 /// Sample a single step with limited results
@@ -402,26 +750,61 @@ pub async fn sample(step_name: String, limit: usize, ctx: SharedContext) -> Resu
         (pack, inputs_needed)
     };
 
-    // Prompt for inputs if any
+    // Check if we need to collect inputs
+    let needs_input = inputs_needed.iter().any(|i| i.required && i.default.is_none());
+
+    // In TUI mode, handle differently
+    if is_tui_mode(&ctx).await {
+        if !inputs_needed.is_empty() {
+            // Has inputs - show form for review/modification
+            return Ok(CommandResult::InputsRequired {
+                inputs: inputs_needed.clone(),
+                context: ExecutionContext {
+                    pack: pack.clone(),
+                    pack_path: None,
+                    all_workspaces: false,
+                },
+            });
+        } else {
+            // No inputs needed - start execution immediately
+            return Ok(CommandResult::StartExecution {
+                context: ExecutionContext {
+                    pack: pack.clone(),
+                    pack_path: None,
+                    all_workspaces: false,
+                },
+                inputs: HashMap::new(),
+            });
+        }
+    }
+
+    // Non-TUI mode: prompt for inputs if required, otherwise use defaults
     let input_values = if inputs_needed.is_empty() {
         HashMap::new()
-    } else {
+    } else if needs_input {
+        // Has required inputs without defaults - must prompt
         match collect_session_inputs(&inputs_needed)? {
             Some(values) => values,
             None => return Ok(CommandResult::message("Cancelled")),
         }
+    } else {
+        // All inputs have defaults - use them
+        inputs_needed.iter()
+            .filter_map(|i| i.default.as_ref().map(|d| (i.name.clone(), d.clone())))
+            .collect()
     };
 
-    // Execute (TODO: Add progress indicator for TUI Phase T5)
+    // Execute
     execute_pack_with_inputs(pack, None, input_values, false, ctx).await
 }
 
-/// Collect input values from user using the input form
+/// Collect input values from user using the input form (non-TUI mode only)
 fn collect_session_inputs(inputs: &[InputDef]) -> Result<Option<HashMap<String, String>>> {
     if inputs.is_empty() {
         return Ok(Some(HashMap::new()));
     }
 
+    // Use modal form (non-TUI mode)
     let form = InputForm::new("Enter Input Values", inputs);
     match form.run()? {
         InputFormResult::Submitted(values) => Ok(Some(values)),
@@ -429,12 +812,12 @@ fn collect_session_inputs(inputs: &[InputDef]) -> Result<Option<HashMap<String, 
     }
 }
 
-/// Collect input values for a pack
+/// Collect input values for a pack (non-TUI mode only)
 fn collect_pack_inputs(pack: &Pack) -> Result<Option<HashMap<String, String>>> {
-    let required_inputs: Vec<_> = pack.inputs.iter().filter(|i| i.required).collect();
+    let required_inputs: Vec<_> = pack.inputs.iter().filter(|i| i.required && i.default.is_none()).collect();
 
     if required_inputs.is_empty() {
-        // Use defaults for optional inputs
+        // Use defaults for all inputs
         let defaults: HashMap<_, _> = pack
             .inputs
             .iter()
@@ -443,13 +826,13 @@ fn collect_pack_inputs(pack: &Pack) -> Result<Option<HashMap<String, String>>> {
         return Ok(Some(defaults));
     }
 
-    // Convert to InputDef for the form
+    // Convert to InputDef for the form (non-TUI mode)
     let input_defs: Vec<InputDef> = pack
         .inputs
         .iter()
         .map(|i| InputDef {
             name: i.name.clone(),
-            input_type: crate::session::InputType::String, // Pack doesn't have type info
+            input_type: crate::session::InputType::String,
             description: i.description.clone(),
             required: i.required,
             default: i.default.clone(),
