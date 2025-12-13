@@ -39,10 +39,10 @@ async fn execute_adhoc_query(
     ctx: SharedContext,
 ) -> Result<CommandResult> {
     // Get workspaces
+    // TODO: Add progress indicator for long-running operations (TUI Phase T5)
     let (client, workspaces) = {
         let mut ctx = ctx.write().await;
         if !ctx.is_initialized() {
-            println!("Connecting to Azure...");
             ctx.initialize().await?;
         }
 
@@ -65,8 +65,6 @@ async fn execute_adhoc_query(
         (client, workspaces)
     };
 
-    println!("Executing on {} workspace(s)...", workspaces.len());
-
     // Create execution record
     let workspace_names: Vec<String> = workspaces.iter().map(|w| w.name.clone()).collect();
     let mut record = ExecutionRecord::new(
@@ -81,11 +79,9 @@ async fn execute_adhoc_query(
     let start = std::time::Instant::now();
     let mut total_rows = 0;
     let mut failed = false;
-    let mut output = String::new();
+    let mut output = format!("Executing on {} workspace(s)...\n", workspaces.len());
 
     for ws in &workspaces {
-        print!("  {} ... ", ws.name);
-
         match client.query_workspace(&ws.workspace_id, &query, timespan.as_deref()).await {
             Ok(response) => {
                 let rows = response
@@ -94,12 +90,10 @@ async fn execute_adhoc_query(
                     .map(|t| t.rows.len())
                     .unwrap_or(0);
                 total_rows += rows;
-                println!("{} rows", rows);
                 output.push_str(&format!("  {} - {} rows\n", ws.name, rows));
             }
             Err(e) => {
                 failed = true;
-                println!("ERROR: {}", e);
                 output.push_str(&format!("  {} - ERROR: {}\n", ws.name, e));
             }
         }
@@ -144,7 +138,7 @@ async fn execute_pack_file(path: PathBuf, all: bool, ctx: SharedContext) -> Resu
     let pack = Pack::load_from_file(&path)
         .map_err(|e| anyhow::anyhow!("Failed to load pack file: {}", e))?;
 
-    println!("Loaded pack: {}", pack.name);
+    // Pack name will be shown in output when execution completes
 
     // Collect inputs if required
     let inputs = collect_pack_inputs(&pack)?;
@@ -233,10 +227,10 @@ async fn execute_pack_with_inputs(
     ctx: SharedContext,
 ) -> Result<CommandResult> {
     // Get client and workspaces
+    // TODO: Add progress indicator for long-running operations (TUI Phase T5)
     let (client, workspaces, output_dir) = {
         let mut ctx = ctx.write().await;
         if !ctx.is_initialized() {
-            println!("Connecting to Azure...");
             ctx.initialize().await?;
         }
 
@@ -261,7 +255,7 @@ async fn execute_pack_with_inputs(
         (client, workspaces, output_dir)
     };
 
-    println!(
+    let mut output = format!(
         "Executing '{}' on {} workspace(s)...\n",
         pack.name,
         workspaces.len()
@@ -418,8 +412,7 @@ pub async fn sample(step_name: String, limit: usize, ctx: SharedContext) -> Resu
         }
     };
 
-    // Execute with sampling message
-    println!("Sampling step '{}' (limit: {} rows)...\n", step_name, limit);
+    // Execute (TODO: Add progress indicator for TUI Phase T5)
     execute_pack_with_inputs(pack, None, input_values, false, ctx).await
 }
 

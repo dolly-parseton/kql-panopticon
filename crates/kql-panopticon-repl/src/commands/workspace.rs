@@ -56,7 +56,7 @@ async fn list(ctx: SharedContext) -> Result<CommandResult> {
     {
         let mut ctx = ctx.write().await;
         if !ctx.is_initialized() {
-            println!("Discovering workspaces...");
+            // TODO: Add progress indicator for long-running operations (TUI Phase T5)
             ctx.initialize().await?;
         }
     }
@@ -105,7 +105,7 @@ async fn select(name: Option<String>, all: bool, ctx: SharedContext) -> Result<C
     {
         let mut ctx = ctx.write().await;
         if !ctx.is_initialized() {
-            println!("Discovering workspaces...");
+            // TODO: Add progress indicator for long-running operations (TUI Phase T5)
             ctx.initialize().await?;
         }
     }
@@ -178,7 +178,7 @@ async fn schema(capture: bool, force: bool, ctx: SharedContext) -> Result<Comman
     {
         let mut ctx = ctx.write().await;
         if !ctx.is_initialized() {
-            println!("Discovering workspaces...");
+            // TODO: Add progress indicator for long-running operations (TUI Phase T5)
             ctx.initialize().await?;
         }
     }

@@ -13,6 +13,10 @@ categories = ["command-line-utilities", "development-tools"]
 name = "kql-repl"
 path = "src/main.rs"
 
+[features]
+default = []
+tui = []  # Full TUI shell (in development)
+
 [dependencies]
 # Core library
 kql-panopticon-core.workspace = true

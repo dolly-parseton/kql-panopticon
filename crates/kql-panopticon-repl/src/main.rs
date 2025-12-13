@@ -5,7 +5,8 @@
 //! ## Usage
 //!
 //! ```bash
-//! kql-repl
+//! kql-repl                    # Legacy REPL (clap_repl + reedline)
+//! kql-repl --features tui     # TUI shell (ratatui-based)
 //! ```
 //!
 //! ## Commands
@@ -29,29 +30,42 @@ mod progress_display;
 mod prompt;
 mod session;
 mod state_graph;
+#[cfg(feature = "tui")]
+mod tui;
 mod validator;
 
 use anyhow::Result;
+
+// Legacy REPL imports (clap_repl + reedline)
+#[cfg(not(feature = "tui"))]
 use clap_repl::{ClapEditor, ReadCommandOutput};
+#[cfg(not(feature = "tui"))]
 use commands::{CommandResult, ReplCommand};
+#[cfg(not(feature = "tui"))]
 use completer::PanopticonCompleter;
+#[cfg(not(feature = "tui"))]
 use context::create_shared_context;
+#[cfg(not(feature = "tui"))]
 use kql_panopticon_core::{Client, Workspace};
+#[cfg(not(feature = "tui"))]
 use prompt::DynamicPrompt;
+#[cfg(not(feature = "tui"))]
 use reedline::ExternalPrinter;
+#[cfg(not(feature = "tui"))]
 use validator::LineContinuationValidator;
+#[cfg(not(feature = "tui"))]
 use std::sync::Arc;
 
+#[cfg(not(feature = "tui"))]
 const BANNER: &str = r#"
 ╦╔═╔═╗ ╦    ╔═╗╔═╗╔╗╔╔═╗╔═╗╔╦╗╦╔═╗╔═╗╔╗╔
 ╠╩╗║═╬╗║    ╠═╝╠═╣║║║║ ║╠═╝ ║ ║║  ║ ║║║║
 ╩ ╩╚═╝╚╩═╝  ╩  ╩ ╩╝╚╝╚═╝╩   ╩ ╩╚═╝╚═╝╝╚╝
 "#;
 
+#[cfg(not(feature = "tui"))]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Global left padding for all REPL output
-pub const OUTPUT_INDENT: &str = "    ";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -59,6 +73,21 @@ async fn main() -> Result<()> {
     // Users can override with RUST_LOG env var if needed
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error")).init();
 
+    // Feature-gated entry point: TUI shell or legacy REPL
+    #[cfg(feature = "tui")]
+    {
+        return tui::run().await;
+    }
+
+    #[cfg(not(feature = "tui"))]
+    {
+        run_legacy_repl().await
+    }
+}
+
+/// Run the legacy REPL (clap_repl + reedline)
+#[cfg(not(feature = "tui"))]
+async fn run_legacy_repl() -> Result<()> {
     // Print banner
     println!("{}", BANNER);
     println!("KQL Panopticon REPL v{}", VERSION);
@@ -101,8 +130,8 @@ async fn main() -> Result<()> {
                     let mut ctx = ctx_clone.write().await;
                     ctx.complete_discovery(client, workspaces);
                     let _ = printer_clone.print(format!(
-                        "\r\x1b[K{}\x1b[32m✓\x1b[0m Discovered {} workspace(s)",
-                        OUTPUT_INDENT,
+                        "\r\x1b[K\x1b[32m✓\x1b[0m Discovered {} workspace(s)",
+                    
                         count
                     ));
                 }
@@ -110,8 +139,8 @@ async fn main() -> Result<()> {
                     let mut ctx = ctx_clone.write().await;
                     ctx.fail_discovery(e.to_string());
                     let _ = printer_clone.print(format!(
-                        "\r\x1b[K{}\x1b[31m✗\x1b[0m Discovery failed: {}",
-                        OUTPUT_INDENT,
+                        "\r\x1b[K\x1b[31m✗\x1b[0m Discovery failed: {}",
+                        
                         truncate_str(&e.to_string(), 50)
                     ));
                 }
@@ -133,7 +162,7 @@ async fn main() -> Result<()> {
                     Ok(CommandResult::Success(Some(msg))) => {
                         // Add indent to each line
                         for line in msg.lines() {
-                            println!("{}{}", OUTPUT_INDENT, line);
+                            println!("{}", line);
                         }
                     }
                     Ok(CommandResult::Success(None)) => {
@@ -142,7 +171,7 @@ async fn main() -> Result<()> {
                     Ok(CommandResult::Output(output)) => {
                         // Add indent to each line
                         for line in output.lines() {
-                            println!("{}{}", OUTPUT_INDENT, line);
+                            println!("{}", line);
                         }
                     }
                     Ok(CommandResult::Clear) => {
@@ -150,14 +179,14 @@ async fn main() -> Result<()> {
                         print!("\x1B[2J\x1B[1;1H");
                     }
                     Ok(CommandResult::Exit) => {
-                        println!("{}Goodbye!", OUTPUT_INDENT);
+                        println!("Goodbye!");
                         break;
                     }
                     Ok(CommandResult::Error(msg)) => {
-                        eprintln!("{}Error: {}", OUTPUT_INDENT, msg);
+                        eprintln!("Error: {}", msg);
                     }
                     Err(e) => {
-                        eprintln!("{}Error: {}", OUTPUT_INDENT, e);
+                        eprintln!("Error: {}", e);
                     }
                 }
             }
@@ -169,10 +198,10 @@ async fn main() -> Result<()> {
                 let _ = e.print();
             }
             ReadCommandOutput::ShlexError => {
-                eprintln!("{}Error: Invalid input syntax", OUTPUT_INDENT);
+                eprintln!("Error: Invalid input syntax");
             }
             ReadCommandOutput::ReedlineError(e) => {
-                eprintln!("{}Input error: {}", OUTPUT_INDENT, e);
+                eprintln!("Input error: {}", e);
             }
             ReadCommandOutput::CtrlC => {
                 // println!("Goodbye!");
@@ -180,7 +209,7 @@ async fn main() -> Result<()> {
             }
             ReadCommandOutput::CtrlD => {
                 // Exit on Ctrl+D
-                println!("{}Goodbye!", OUTPUT_INDENT);
+                println!("Goodbye!");
                 break;
             }
         }
@@ -190,6 +219,7 @@ async fn main() -> Result<()> {
 }
 
 /// Discover workspaces in the background
+#[cfg(not(feature = "tui"))]
 async fn discover_workspaces_background() -> Result<(Client, Vec<Workspace>)> {
     let client = Client::new()?;
     let workspaces = client.list_workspaces().await?;
@@ -197,6 +227,7 @@ async fn discover_workspaces_background() -> Result<(Client, Vec<Workspace>)> {
 }
 
 /// Truncate a string to max length, adding "..." if truncated
+#[cfg(not(feature = "tui"))]
 fn truncate_str(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()

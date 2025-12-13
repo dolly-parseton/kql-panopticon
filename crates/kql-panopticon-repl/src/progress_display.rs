@@ -2,7 +2,6 @@
 //!
 //! Simple text-based progress output.
 
-use crate::OUTPUT_INDENT;
 use kql_panopticon_core::execution::progress::{
     progress_channel, ProgressReceiver, ProgressSender, ProgressUpdate,
 };
@@ -23,13 +22,13 @@ pub async fn run_progress_display(
     workspace: String,
     mut receiver: ProgressReceiver,
 ) -> anyhow::Result<()> {
-    println!("{}Running on {}...", OUTPUT_INDENT, workspace);
+    println!("Running on {}...", workspace);
 
     // Process updates until complete
     while let Some(update) = receiver.recv().await {
         match &update {
             ProgressUpdate::StepStarted { step_name, .. } => {
-                print!("{}  ⟳ {} running...", OUTPUT_INDENT, step_name);
+                print!("  ⟳ {} running...", step_name);
                 // Flush to show immediately
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
@@ -41,17 +40,17 @@ pub async fn run_progress_display(
                 ..
             } => {
                 // Clear the "running" line and print completed
-                print!("\r{}  \x1b[32m✓\x1b[0m {} - {} rows ({}ms)\n", OUTPUT_INDENT, step_name, rows, duration_ms);
+                print!("\r  \x1b[32m✓\x1b[0m {} - {} rows ({}ms)\n", step_name, rows, duration_ms);
             }
             ProgressUpdate::StepFailed {
                 step_name, error, ..
             } => {
-                print!("\r{}  \x1b[31m✗\x1b[0m {} - {}\n", OUTPUT_INDENT, step_name, error);
+                print!("\r  \x1b[31m✗\x1b[0m {} - {}\n", step_name, error);
             }
             ProgressUpdate::StepSkipped {
                 step_name, reason, ..
             } => {
-                println!("{}  ○ {} - skipped: {}", OUTPUT_INDENT, step_name, reason);
+                println!("  ○ {} - skipped: {}", step_name, reason);
             }
             ProgressUpdate::Completed { .. } | ProgressUpdate::Failed { .. } => {
                 break;
