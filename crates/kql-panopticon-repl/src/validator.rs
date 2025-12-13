@@ -1,64 +1,26 @@
-//! Line continuation validator for multi-line input
+//! Line continuation utilities
 //!
-//! Detects trailing backslashes and signals reedline to continue
-//! reading input until a complete command is entered.
+//! Provides utilities for processing multi-line input with backslash
+//! line continuation.
 
-use reedline::{ValidationResult, Validator};
-
-/// Validator that detects line continuation with trailing backslash
+/// Process a multi-line input by joining continuation lines
 ///
-/// When input ends with `\` (ignoring trailing whitespace), the validator
-/// signals that more input is needed. This allows multi-line queries like:
+/// Removes trailing backslashes and joins lines, preserving the
+/// content after the backslash on each line.
+///
+/// # Example
 ///
 /// ```text
 /// query events = "SecurityEvent \
 ///     | where EventID == 4625 \
 ///     | project Account, IpAddress"
 /// ```
-#[derive(Debug, Clone, Default)]
-pub struct LineContinuationValidator;
-
-impl LineContinuationValidator {
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// Check if input needs continuation (ends with unescaped backslash)
-    fn needs_continuation(input: &str) -> bool {
-        let trimmed = input.trim_end();
-
-        // Check for trailing backslash that's not escaped (\\)
-        if trimmed.ends_with('\\') {
-            // Count consecutive backslashes at the end
-            let backslash_count = trimmed
-                .chars()
-                .rev()
-                .take_while(|&c| c == '\\')
-                .count();
-
-            // Odd number of backslashes means line continuation
-            // Even number means escaped backslash
-            backslash_count % 2 == 1
-        } else {
-            false
-        }
-    }
-}
-
-impl Validator for LineContinuationValidator {
-    fn validate(&self, line: &str) -> ValidationResult {
-        if Self::needs_continuation(line) {
-            ValidationResult::Incomplete
-        } else {
-            ValidationResult::Complete
-        }
-    }
-}
-
-/// Process a multi-line input by joining continuation lines
 ///
-/// Removes trailing backslashes and joins lines, preserving the
-/// content after the backslash on each line.
+/// Becomes:
+///
+/// ```text
+/// query events = "SecurityEvent | where EventID == 4625 | project Account, IpAddress"
+/// ```
 pub fn join_continuation_lines(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -108,28 +70,6 @@ pub fn join_continuation_lines(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_needs_continuation_trailing_backslash() {
-        assert!(LineContinuationValidator::needs_continuation("query x = \"test \\"));
-        assert!(LineContinuationValidator::needs_continuation("test\\"));
-        assert!(LineContinuationValidator::needs_continuation("test\\  ")); // trailing spaces
-    }
-
-    #[test]
-    fn test_needs_continuation_no_backslash() {
-        assert!(!LineContinuationValidator::needs_continuation("query x = \"test\""));
-        assert!(!LineContinuationValidator::needs_continuation("test"));
-        assert!(!LineContinuationValidator::needs_continuation(""));
-    }
-
-    #[test]
-    fn test_needs_continuation_escaped_backslash() {
-        // Double backslash is escaped, not continuation
-        assert!(!LineContinuationValidator::needs_continuation("test\\\\"));
-        // Triple backslash: \\ (escaped) + \ (continuation)
-        assert!(LineContinuationValidator::needs_continuation("test\\\\\\"));
-    }
 
     #[test]
     fn test_join_simple() {

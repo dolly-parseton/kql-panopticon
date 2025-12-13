@@ -3,10 +3,7 @@
 use crate::context::SharedContext;
 use crate::history::{ExecutionRecord, ExecutionSource, ExecutionStatusSummary, ExecutionSummary};
 use crate::input_form::{InputForm, InputFormResult};
-use crate::progress_display::{create_progress_channel, run_progress_display};
-#[cfg(feature = "tui")]
-use crate::progress_display::run_tui_progress_forwarder;
-#[cfg(feature = "tui")]
+use crate::progress_display::{create_progress_channel, run_progress_display, run_tui_progress_forwarder};
 use crate::tui::events::TuiEventSender;
 use crate::session::{InputDef, PackSession};
 use super::{CommandResult, ExecutionContext, StepResultData};
@@ -479,7 +476,6 @@ pub async fn execute_pack_with_inputs(
 /// # Returns
 /// - `job_id`: UUID for tracking the job
 /// - `step_names`: Names of steps in execution order (for RunProgressWidget)
-#[cfg(feature = "tui")]
 pub async fn spawn_tui_execution(
     pack: Pack,
     pack_path: Option<PathBuf>,

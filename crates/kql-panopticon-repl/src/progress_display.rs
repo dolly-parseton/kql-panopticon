@@ -8,7 +8,6 @@ use kql_panopticon_core::execution::progress::{
 };
 use uuid::Uuid;
 
-#[cfg(feature = "tui")]
 use crate::tui::events::{TuiEvent, TuiEventSender};
 
 /// Create a progress channel for execution
@@ -101,7 +100,6 @@ pub async fn run_progress_display(
 /// * `step_names` - Names of steps in execution order
 /// * `receiver` - Progress updates from the executor
 /// * `event_tx` - TuiEvent sender to the App
-#[cfg(feature = "tui")]
 pub async fn run_tui_progress_forwarder(
     pack_name: String,
     step_names: Vec<String>,

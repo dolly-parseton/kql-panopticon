@@ -2,8 +2,6 @@
 //!
 //! Full terminal user interface that wraps the interpreter,
 //! providing inline widgets, scrollable output, and unified rendering.
-//!
-//! Enable with `cargo run --features tui`
 
 mod active_job;
 mod app;
