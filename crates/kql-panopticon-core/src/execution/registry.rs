@@ -31,7 +31,7 @@
 //! }
 //! ```
 
-use super::progress::{JobType, ProgressReceiver, ProgressSender, ProgressUpdate};
+use super::progress::{JobType, ProgressSender, ProgressUpdate};
 use crate::error::{Error, Result};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -231,11 +231,8 @@ impl JobRegistry {
         }
 
         // Create a progress sender that also updates the registry
-        let registry = self.clone();
+        let _registry = self.clone(); // Reserved for future progress interception
         let sender = ProgressSender::new(progress_tx, id);
-
-        // Wrap to intercept progress updates
-        // TODO: In actual implementation, we'd wrap the sender to update latest_progress
 
         Ok((id, sender, cancel_rx))
     }
@@ -342,13 +339,14 @@ impl JobRegistry {
     }
 
     /// Subscribe to progress updates for a job (for TUI monitor)
+    ///
+    /// Note: Currently returns a stub receiver. Full implementation pending
+    /// broadcast channel integration for TUI support.
     pub fn subscribe(&self, id: Uuid) -> Result<mpsc::UnboundedReceiver<ProgressUpdate>> {
         let inner = self.inner.read().map_err(|_| Error::other("Lock poisoned"))?;
-        if let Some(job) = inner.jobs.get(&id) {
-            // Create a new receiver by subscribing to the broadcast
-            let (tx, rx) = mpsc::unbounded_channel();
-            // TODO: In actual implementation, use broadcast channel or similar
-            // For now, this is a stub
+        if inner.jobs.contains_key(&id) {
+            // Stub: Create a receiver (actual broadcast subscription TBD for TUI)
+            let (_tx, rx) = mpsc::unbounded_channel();
             Ok(rx)
         } else {
             Err(Error::other(format!("Job {} not found", id)))
@@ -451,7 +449,7 @@ impl JobRegistry {
             .iter()
             .filter(|(_, j)| {
                 matches!(j.status, JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled)
-                    && j.info.completed_at.map_or(false, |t| t < cutoff)
+                    && j.info.completed_at.is_some_and(|t| t < cutoff)
             })
             .map(|(id, _)| *id)
             .collect();

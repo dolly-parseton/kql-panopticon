@@ -13,7 +13,7 @@ use crate::client::Client;
 use crate::error::{Error, Result};
 use crate::workspace::Workspace;
 use chrono::Duration;
-use log::{debug, info, warn};
+use tracing::{debug, info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -247,11 +247,9 @@ impl SchemaCapture {
             registry.touch_workspace(workspace_id);
         }
 
-        // Report completion
-        let phase = if errors.is_empty() {
+        // Report completion (partial success if some tables captured despite errors)
+        let phase = if errors.is_empty() || tables_captured > 0 {
             CapturePhase::Completed
-        } else if tables_captured > 0 {
-            CapturePhase::Completed // Partial success
         } else {
             CapturePhase::Failed
         };

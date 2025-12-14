@@ -2,9 +2,9 @@
 //!
 //! Contains configuration, result, and status types used by the executor.
 
-use crate::pack::Pack;
+use super::result::ResultContext;
 use super::trace::ExecutionTrace;
-use serde_json::Value as JsonValue;
+use crate::pack::Pack;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -159,8 +159,8 @@ pub struct WorkspaceResult {
     /// Per-step results
     pub step_results: HashMap<String, StepResult>,
 
-    /// Step results as JSON rows (for substitution context)
-    pub step_data: HashMap<String, Vec<JsonValue>>,
+    /// Step result handles (for accessing file-backed results)
+    pub step_handles: ResultContext,
 
     /// Total duration
     pub duration_ms: u64,
@@ -229,6 +229,7 @@ pub enum StepStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pack::Acquisition;
 
     #[test]
     fn test_config_builder() {
@@ -236,12 +237,9 @@ mod tests {
             name: "test".to_string(),
             description: None,
             version: None,
-            inputs: vec![],
-            steps: vec![],
-            output: None,
-            secrets: None,
-            report: None,
-            scoring: None,
+            acquisition: Acquisition::new(),
+            processing: None,
+            reporting: None,
         };
 
         let config = PackExecutorConfig::new(pack)

@@ -9,6 +9,8 @@ use std::collections::HashMap;
 /// Complete execution trace for debugging
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionTrace {
+    /// Overall execution status
+    pub status: TraceStatus,
     /// Traced steps
     pub steps: Vec<StepTrace>,
     /// Global context (inputs, resolved secrets, etc.)
@@ -55,6 +57,11 @@ impl ExecutionTrace {
             .iter()
             .filter(|s| matches!(s.status, TraceStatus::Skipped))
             .count()
+    }
+
+    /// Set the overall execution status
+    pub fn set_status(&mut self, status: TraceStatus) {
+        self.status = status;
     }
 }
 
@@ -169,24 +176,27 @@ pub enum StepType {
     File,
 }
 
-impl From<crate::pack::StepType> for StepType {
-    fn from(st: crate::pack::StepType) -> Self {
+impl From<crate::pack::AcquisitionStepType> for StepType {
+    fn from(st: crate::pack::AcquisitionStepType) -> Self {
         match st {
-            crate::pack::StepType::Kql => StepType::Kql,
-            crate::pack::StepType::Http => StepType::Http,
-            crate::pack::StepType::File => StepType::File,
+            crate::pack::AcquisitionStepType::Kql => StepType::Kql,
+            crate::pack::AcquisitionStepType::Http => StepType::Http,
+            crate::pack::AcquisitionStepType::File => StepType::File,
         }
     }
 }
 
 /// Status in trace
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TraceStatus {
+    #[default]
     Pending,
     Running,
     Success,
     Failed,
     Skipped,
+    /// Partial success (some steps succeeded, some failed)
+    Partial,
 }
 
 /// The actual request/query submitted

@@ -1,46 +1,84 @@
-//! Pack executor for dependency-driven execution
+//! Pack executor for phase-based execution
 //!
-//! Executes pack steps in topological order based on dependencies.
-//! Steps with no dependencies can run when ready; steps with dependencies
-//! wait for their dependencies to complete.
+//! Orchestrates pack execution through three phases:
+//! 1. Acquisition - Data collection (per workspace)
+//! 2. Processing - Data transformation (global)
+//! 3. Reporting - Output generation (global)
 
 use crate::client::Client;
-use crate::error::{Error, Result};
-use crate::pack::{AggregateStrategy, ForeachClause, OnEmpty, OnError, Pack, Step, StepType};
-use crate::variable::{evaluate_condition, SubstitutionContext};
+use crate::error::Result;
+use crate::pack::Pack;
 use crate::workspace::Workspace;
 
-use super::engine::{ExecutionEngine, ExecutionOptions};
-use super::handlers::{FileHandler, HttpHandler, KqlHandler};
-use super::output::write_csv_results;
+use super::acquisition::steps::{FileStepHandler, HttpStepHandler, KqlStepHandler};
+use super::acquisition::AcquisitionPhaseHandler;
+use super::processing::steps::ScoringStepHandler;
+use super::processing::ProcessingPhaseHandler;
 use super::progress::{JobType, ProgressSender};
-use super::step::{StepContext, StepHandler, StepOutput};
-use super::trace::{
-    ErrorCategory, ErrorTrace, ExecutionTrace, StepTrace, TraceStatus,
-    StepType as TraceStepType,
-};
+use super::reporting::steps::TemplateStepHandler;
+use super::reporting::ReportingPhaseHandler;
+use super::result::ResultContext;
+use super::trace::{ExecutionTrace, TraceStatus};
 use super::types::{
-    ExecutionStatus, PackExecutorConfig, PackExecutorResult, StepResult, StepStatus,
-    WorkspaceResult,
+    ExecutionStatus, PackExecutorConfig, PackExecutorResult, StepResult, WorkspaceResult,
 };
 
-use async_trait::async_trait;
 use chrono::Local;
-use log::{debug, info, warn};
-use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs;
+use tracing::{debug, info};
 
-/// Pack executor - coordinates step execution
-pub struct PackExecutor {
-    /// Registered step handlers
-    handlers: Vec<Box<dyn StepHandler>>,
+/// Execution mode for the pack
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecutionMode {
+    /// Normal execution
+    #[default]
+    Normal,
+    /// Dry run - validate but don't execute
+    DryRun,
+    /// Debug mode - extra logging
+    Debug,
+}
 
+/// Execution options
+#[derive(Debug, Clone)]
+pub struct ExecutionOptions {
+    /// Execution mode
+    pub mode: ExecutionMode,
+    /// Enable execution tracing
+    pub trace: bool,
     /// Default timeout for steps
-    default_timeout: Duration,
+    pub timeout: Duration,
+}
+
+impl Default for ExecutionOptions {
+    fn default() -> Self {
+        Self {
+            mode: ExecutionMode::Normal,
+            trace: false,
+            timeout: Duration::from_secs(120),
+        }
+    }
+}
+
+/// Pack executor - coordinates phase-based execution
+///
+/// Executes packs through three phases:
+/// 1. **Acquisition**: Per-workspace data collection
+/// 2. **Processing**: Global data transformation
+/// 3. **Reporting**: Global report generation
+pub struct PackExecutor {
+    /// Acquisition phase handler
+    acquisition: AcquisitionPhaseHandler,
+
+    /// Processing phase handler
+    processing: ProcessingPhaseHandler,
+
+    /// Reporting phase handler
+    reporting: ReportingPhaseHandler,
 
     /// Execution options
     options: ExecutionOptions,
@@ -50,13 +88,25 @@ impl PackExecutor {
     /// Create a new executor with the given client
     pub fn new(client: Client) -> Self {
         let client = Arc::new(client);
+
+        // Initialize acquisition phase with handlers
+        let mut acquisition = AcquisitionPhaseHandler::new();
+        acquisition.register(Box::new(KqlStepHandler::new(client)));
+        acquisition.register(Box::new(HttpStepHandler::new()));
+        acquisition.register(Box::new(FileStepHandler::new()));
+
+        // Initialize processing phase with handlers
+        let mut processing = ProcessingPhaseHandler::new();
+        processing.register(Box::new(ScoringStepHandler::new()));
+
+        // Initialize reporting phase with handlers
+        let mut reporting = ReportingPhaseHandler::new();
+        reporting.register(Box::new(TemplateStepHandler::new()));
+
         Self {
-            handlers: vec![
-                Box::new(KqlHandler::new(client)),
-                Box::new(HttpHandler::new()),
-                Box::new(FileHandler::new()),
-            ],
-            default_timeout: Duration::from_secs(120),
+            acquisition,
+            processing,
+            reporting,
             options: ExecutionOptions::default(),
         }
     }
@@ -68,21 +118,159 @@ impl PackExecutor {
         executor
     }
 
+    /// Set execution options
+    pub fn set_options(&mut self, options: ExecutionOptions) {
+        self.options = options;
+    }
+
     /// Set default timeout
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.default_timeout = timeout;
+        self.options.timeout = timeout;
         self
     }
 
-    /// Get handler for a step type
-    fn get_handler(&self, step_type: StepType) -> Option<&dyn StepHandler> {
-        self.handlers
-            .iter()
-            .find(|h| h.step_type() == step_type)
-            .map(|h| h.as_ref())
+    /// Validate a pack configuration
+    ///
+    /// Validates all phases (acquisition, processing, reporting) to ensure
+    /// the pack can be executed successfully.
+    pub fn validate(&self, config: &PackExecutorConfig) -> Result<()> {
+        let pack = &config.pack;
+
+        // Validate acquisition phase
+        self.acquisition.validate(&pack.acquisition)?;
+
+        // Validate processing phase (if present)
+        if let Some(ref processing) = pack.processing {
+            self.processing.validate(processing)?;
+        }
+
+        // Validate reporting phase (if present)
+        if let Some(ref reporting) = pack.reporting {
+            self.reporting.validate(reporting)?;
+        }
+
+        Ok(())
     }
 
-    /// Execute steps for a single workspace
+    /// Execute a pack across workspaces
+    pub async fn execute(
+        &self,
+        config: PackExecutorConfig,
+        workspaces: Vec<Workspace>,
+        progress: Option<ProgressSender>,
+    ) -> Result<PackExecutorResult> {
+        let job_id = uuid::Uuid::new_v4();
+        let start = Instant::now();
+        let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+
+        let pack = &config.pack;
+        let mut workspace_results: HashMap<String, WorkspaceResult> = HashMap::new();
+        let mut overall_status = ExecutionStatus::Success;
+        let mut trace = if self.options.trace {
+            Some(ExecutionTrace::new())
+        } else {
+            None
+        };
+
+        info!(
+            job_id = %job_id,
+            pack = %pack.name,
+            workspaces = workspaces.len(),
+            "Starting pack execution"
+        );
+
+        // Emit job started
+        if let Some(ref tx) = progress {
+            tx.started(JobType::Investigation, pack.acquisition.steps.len(), workspaces.len());
+        }
+
+        // Execute per workspace
+        for workspace in &workspaces {
+            debug!(
+                workspace = %workspace.name,
+                workspace_id = %workspace.workspace_id,
+                "Starting workspace execution"
+            );
+
+            // Emit workspace started
+            if let Some(ref tx) = progress {
+                tx.workspace_started(&workspace.name);
+            }
+
+            let ws_result = self
+                .execute_workspace(pack, workspace, &config, &timestamp, progress.as_ref())
+                .await;
+
+            let ws_status = ws_result.status;
+
+            // Emit workspace completed
+            if let Some(ref tx) = progress {
+                tx.workspace_completed(&workspace.name, ws_result.duration_ms);
+            }
+
+            // Update overall status
+            if ws_status == ExecutionStatus::Failed {
+                overall_status = ExecutionStatus::Partial;
+            }
+
+            workspace_results.insert(workspace.name.clone(), ws_result);
+        }
+
+        // Determine final status
+        let all_failed = workspace_results
+            .values()
+            .all(|r| r.status == ExecutionStatus::Failed);
+        let all_succeeded = workspace_results
+            .values()
+            .all(|r| r.status == ExecutionStatus::Success);
+
+        overall_status = if all_failed {
+            ExecutionStatus::Failed
+        } else if all_succeeded {
+            ExecutionStatus::Success
+        } else {
+            ExecutionStatus::Partial
+        };
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        // Emit job completed
+        if let Some(ref tx) = progress {
+            tx.completed(duration_ms);
+        }
+
+        info!(
+            job_id = %job_id,
+            status = ?overall_status,
+            duration_ms = duration_ms,
+            "Pack execution completed"
+        );
+
+        // Finalize trace
+        if let Some(ref mut t) = trace {
+            t.set_status(match overall_status {
+                ExecutionStatus::Success => TraceStatus::Success,
+                ExecutionStatus::Failed => TraceStatus::Failed,
+                ExecutionStatus::Partial => TraceStatus::Partial,
+                ExecutionStatus::Pending | ExecutionStatus::Running => TraceStatus::Running,
+            });
+        }
+
+        // Build output directory for result
+        let output_dir = config.output_dir.clone();
+
+        Ok(PackExecutorResult {
+            job_id,
+            pack_name: pack.name.clone(),
+            status: overall_status,
+            workspace_results,
+            duration_ms,
+            output_dir,
+            trace,
+        })
+    }
+
+    /// Execute pack for a single workspace
     async fn execute_workspace(
         &self,
         pack: &Pack,
@@ -92,10 +280,6 @@ impl PackExecutor {
         progress: Option<&ProgressSender>,
     ) -> WorkspaceResult {
         let start = Instant::now();
-        let mut step_results: HashMap<String, StepResult> = HashMap::new();
-        let mut step_data: HashMap<String, Vec<JsonValue>> = HashMap::new();
-        let mut failed_step = None;
-        let mut failure_reason = None;
 
         // Build output directory
         let output_dir = config
@@ -114,585 +298,185 @@ impl PackExecutor {
                 workspace_name: workspace.name.clone(),
                 workspace_id: workspace.workspace_id.clone(),
                 status: ExecutionStatus::Failed,
-                step_results,
-                step_data,
+                step_results: HashMap::new(),
+                step_handles: ResultContext::new(),
                 duration_ms: start.elapsed().as_millis() as u64,
                 failed_step: None,
                 failure_reason: Some(format!("Failed to create output directory: {}", e)),
             };
         }
 
-        // Get execution order
-        let execution_order = match pack.execution_order() {
-            Ok(order) => order,
+        // Phase 1: Acquisition
+        debug!(phase = "acquisition", "Starting acquisition phase");
+
+        let acq_output = self
+            .acquisition
+            .execute(
+                pack,
+                workspace,
+                config.inputs.clone(),
+                &workspace_output_dir,
+                progress,
+            )
+            .await;
+
+        let acq_output = match acq_output {
+            Ok(output) => output,
             Err(e) => {
                 return WorkspaceResult {
                     workspace_name: workspace.name.clone(),
                     workspace_id: workspace.workspace_id.clone(),
                     status: ExecutionStatus::Failed,
-                    step_results,
-                    step_data,
+                    step_results: HashMap::new(),
+                    step_handles: ResultContext::new(),
                     duration_ms: start.elapsed().as_millis() as u64,
                     failed_step: None,
-                    failure_reason: Some(e.to_string()),
+                    failure_reason: Some(format!("Acquisition phase failed: {}", e)),
                 };
             }
         };
 
-        // Build initial substitution context with inputs
-        let mut substitution = SubstitutionContext::new();
-        for (key, value) in &config.inputs {
-            substitution.inputs.insert(key.clone(), value.clone());
-        }
-
-        // Execute each step in order
-        for step in execution_order {
-            // Check if dependencies succeeded
-            let deps = pack.get_all_dependencies(step);
-            let deps_ok = deps.iter().all(|dep| {
-                step_results
-                    .get(dep)
-                    .map(|r| matches!(r.status, StepStatus::Success))
-                    .unwrap_or(false)
-            });
-
-            if !deps_ok && !deps.is_empty() {
-                // Emit skip event
-                if let Some(tx) = progress {
-                    tx.step_skipped(&step.name, &workspace.name, "Dependency failed");
-                }
-
-                step_results.insert(
-                    step.name.clone(),
-                    StepResult {
-                        name: step.name.clone(),
-                        status: StepStatus::Skipped,
-                        row_count: None,
-                        duration_ms: 0,
-                        output_path: None,
-                        error: Some("Dependency failed".to_string()),
-                    },
-                );
-                continue;
-            }
-
-            // Check `when` condition if specified
-            if let Some(when_condition) = &step.when {
-                let condition_met = evaluate_condition(when_condition, &substitution.step_results);
-
-                debug!(
-                    "Step '{}' when condition '{}' evaluated to: {}",
-                    step.name, when_condition, condition_met
-                );
-
-                if !condition_met {
-                    let reason = format!("Condition not met: {}", when_condition);
-
-                    // Emit skip event
-                    if let Some(tx) = progress {
-                        tx.step_skipped(&step.name, &workspace.name, &reason);
-                    }
-
-                    step_results.insert(
-                        step.name.clone(),
-                        StepResult {
-                            name: step.name.clone(),
-                            status: StepStatus::Skipped,
-                            row_count: None,
-                            duration_ms: 0,
-                            output_path: None,
-                            error: Some(reason),
-                        },
-                    );
-                    continue;
-                }
-            }
-
-            // Emit step started event
-            if let Some(tx) = progress {
-                tx.step_started(&step.name, &workspace.name);
-            }
-
-            // Check if this is a foreach step
-            let result = if let Some(foreach_str) = &step.foreach {
-                self.execute_foreach_step(
-                    step,
-                    foreach_str,
-                    workspace,
-                    &substitution,
-                    &workspace_output_dir,
-                    progress,
-                )
-                .await
-            } else {
-                // Single execution
-                self.execute_step(step, workspace, &substitution, &workspace_output_dir)
-                    .await
+        // Check if acquisition had a failure
+        if acq_output.failed_step.is_some() {
+            return WorkspaceResult {
+                workspace_name: workspace.name.clone(),
+                workspace_id: workspace.workspace_id.clone(),
+                status: ExecutionStatus::Failed,
+                step_results: convert_step_statuses(&acq_output.step_statuses),
+                step_handles: acq_output.results,
+                duration_ms: start.elapsed().as_millis() as u64,
+                failed_step: acq_output.failed_step,
+                failure_reason: acq_output.failure_reason,
             };
-
-            match result {
-                Ok(output) => {
-                    let duration_ms = output.duration.as_millis() as u64;
-
-                    // Emit step completed event
-                    if let Some(tx) = progress {
-                        tx.step_completed(&step.name, &workspace.name, output.row_count, duration_ms);
-                    }
-
-                    // Add results to substitution context for downstream steps
-                    substitution
-                        .step_results
-                        .insert(step.name.clone(), output.rows.clone());
-                    step_data.insert(step.name.clone(), output.rows.clone());
-
-                    // Write results to file
-                    let output_path = workspace_output_dir.join(format!("{}.csv", step.name));
-                    if let Err(e) = write_csv_results(&output.rows, &output_path).await {
-                        warn!("Failed to write results for step '{}': {}", step.name, e);
-                    }
-
-                    step_results.insert(
-                        step.name.clone(),
-                        StepResult {
-                            name: step.name.clone(),
-                            status: StepStatus::Success,
-                            row_count: Some(output.row_count),
-                            duration_ms,
-                            output_path: Some(output_path),
-                            error: None,
-                        },
-                    );
-
-                    info!(
-                        "Step '{}' completed: {} rows",
-                        step.name, output.row_count
-                    );
-                }
-                Err(e) => {
-                    let error_msg = e.to_string();
-
-                    // Handle on_error behavior
-                    let should_fail = match step.on_error.unwrap_or_default() {
-                        OnError::Fail => true,
-                        OnError::Skip | OnError::Continue => {
-                            info!("Step '{}' error ignored due to on_error setting: {}", step.name, error_msg);
-                            false
-                        }
-                    };
-
-                    if should_fail {
-                        // Emit step failed event
-                        if let Some(tx) = progress {
-                            tx.step_failed(&step.name, &workspace.name, &error_msg);
-                        }
-
-                        failed_step = Some(step.name.clone());
-                        failure_reason = Some(error_msg.clone());
-
-                        step_results.insert(
-                            step.name.clone(),
-                            StepResult {
-                                name: step.name.clone(),
-                                status: StepStatus::Failed,
-                                row_count: None,
-                                duration_ms: 0,
-                                output_path: None,
-                                error: Some(error_msg.clone()),
-                            },
-                        );
-
-                        warn!("Step '{}' failed: {}", step.name, error_msg);
-                    } else {
-                        // Record as skipped with empty results
-                        if let Some(tx) = progress {
-                            tx.step_skipped(&step.name, &workspace.name, format!("Error ignored: {}", error_msg));
-                        }
-
-                        substitution.step_results.insert(step.name.clone(), vec![]);
-                        step_data.insert(step.name.clone(), vec![]);
-
-                        step_results.insert(
-                            step.name.clone(),
-                            StepResult {
-                                name: step.name.clone(),
-                                status: StepStatus::Skipped,
-                                row_count: Some(0),
-                                duration_ms: 0,
-                                output_path: None,
-                                error: Some(format!("Error ignored: {}", error_msg)),
-                            },
-                        );
-                    }
-                }
-            }
         }
 
-        // Determine overall status
-        let status = if failed_step.is_some() {
-            if step_results
-                .values()
-                .any(|r| matches!(r.status, StepStatus::Success))
-            {
-                ExecutionStatus::Partial
+        // Phase 2: Processing (if configured)
+        let proc_output = if let Some(ref processing) = pack.processing {
+            if !processing.is_empty() {
+                debug!(phase = "processing", "Starting processing phase");
+
+                let output = self
+                    .processing
+                    .execute(processing, &acq_output.results, &workspace_output_dir, progress)
+                    .await;
+
+                match output {
+                    Ok(o) => Some(o),
+                    Err(e) => {
+                        return WorkspaceResult {
+                            workspace_name: workspace.name.clone(),
+                            workspace_id: workspace.workspace_id.clone(),
+                            status: ExecutionStatus::Failed,
+                            step_results: convert_step_statuses(&acq_output.step_statuses),
+                            step_handles: acq_output.results,
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            failed_step: None,
+                            failure_reason: Some(format!("Processing phase failed: {}", e)),
+                        };
+                    }
+                }
             } else {
-                ExecutionStatus::Failed
+                None
             }
         } else {
-            ExecutionStatus::Success
+            None
         };
+
+        // Phase 3: Reporting (if configured)
+        if let Some(ref reporting) = pack.reporting {
+            if !reporting.is_empty() {
+                debug!(phase = "reporting", "Starting reporting phase");
+
+                // Pass ResultContext refs for lazy materialization
+                let _rep_output = self
+                    .reporting
+                    .execute(
+                        reporting,
+                        &pack.name,
+                        workspace,
+                        &config.inputs,
+                        &acq_output.results,
+                        proc_output.as_ref().map(|p| &p.results),
+                        &workspace_output_dir,
+                        config.pack_path.as_deref(),
+                        progress,
+                    )
+                    .await;
+
+                // Reporting failures don't fail the workspace (logged but continued)
+            }
+        }
+
+        // Build final step results
+        let mut step_results = convert_step_statuses(&acq_output.step_statuses);
+
+        // Add processing step results and merge handles
+        let mut step_handles = acq_output.results;
+        if let Some(proc) = proc_output {
+            // Merge processing result handles
+            step_handles.merge(proc.results);
+
+            // Add processing step statuses
+            for (name, status) in &proc.step_statuses {
+                step_results.insert(
+                    name.clone(),
+                    StepResult {
+                        name: name.clone(),
+                        status: match status.status {
+                            super::processing::ProcessingStatus::Success => {
+                                super::types::StepStatus::Success
+                            }
+                            super::processing::ProcessingStatus::Failed => {
+                                super::types::StepStatus::Failed
+                            }
+                            super::processing::ProcessingStatus::Skipped => {
+                                super::types::StepStatus::Skipped
+                            }
+                        },
+                        row_count: None,
+                        duration_ms: status.duration_ms,
+                        output_path: None,
+                        error: status.error.clone(),
+                    },
+                );
+            }
+        }
 
         WorkspaceResult {
             workspace_name: workspace.name.clone(),
             workspace_id: workspace.workspace_id.clone(),
-            status,
+            status: ExecutionStatus::Success,
             step_results,
-            step_data,
+            step_handles,
             duration_ms: start.elapsed().as_millis() as u64,
-            failed_step,
-            failure_reason,
+            failed_step: None,
+            failure_reason: None,
         }
-    }
-
-    /// Execute a single step using the appropriate handler
-    async fn execute_step(
-        &self,
-        step: &Step,
-        workspace: &Workspace,
-        substitution: &SubstitutionContext,
-        output_dir: &std::path::Path,
-    ) -> Result<StepOutput> {
-        let handler = self.get_handler(step.step_type).ok_or_else(|| {
-            Error::execution(format!("No handler for step type {:?}", step.step_type))
-        })?;
-
-        let ctx = StepContext {
-            substitution,
-            workspace: Some(workspace),
-            output_dir,
-            timeout: self.default_timeout,
-        };
-
-        debug!("Executing step '{}' (type: {:?})", step.name, step.step_type);
-        handler.execute(step, &ctx).await
-    }
-
-    /// Build execution trace from workspace results
-    fn build_trace(
-        &self,
-        pack: &Pack,
-        workspace_results: &HashMap<String, WorkspaceResult>,
-    ) -> ExecutionTrace {
-        let mut trace = ExecutionTrace::new();
-
-        // Add pack inputs to context
-        for input in &pack.inputs {
-            trace.set_context(
-                format!("input.{}", input.name),
-                serde_json::json!({
-                    "required": input.required,
-                    "default": input.default,
-                }),
-            );
-        }
-
-        // Build step map for quick lookup
-        let step_map: HashMap<&str, &Step> = pack.steps.iter().map(|s| (s.name.as_str(), s)).collect();
-
-        // Create step traces from results
-        for (workspace_id, ws_result) in workspace_results {
-            for (step_name, step_result) in &ws_result.step_results {
-                let step = step_map.get(step_name.as_str());
-                let step_type = step
-                    .map(|s| TraceStepType::from(s.step_type))
-                    .unwrap_or(TraceStepType::Kql);
-
-                let mut step_trace = StepTrace::new(step_name, step_type);
-                step_trace.workspace = Some(ws_result.workspace_name.clone());
-                step_trace.duration_ms = Some(step_result.duration_ms);
-                step_trace.rows = step_result.row_count;
-
-                // Set status based on step result
-                step_trace.status = match step_result.status {
-                    StepStatus::Success => TraceStatus::Success,
-                    StepStatus::Failed => TraceStatus::Failed,
-                    StepStatus::Skipped => TraceStatus::Skipped,
-                    StepStatus::Pending => TraceStatus::Pending,
-                    StepStatus::Running => TraceStatus::Running,
-                };
-
-                // Add error info if present
-                if let Some(error_msg) = &step_result.error {
-                    step_trace.error = Some(ErrorTrace::new(error_msg, ErrorCategory::Unknown));
-                }
-
-                trace.add_step(step_trace);
-            }
-        }
-
-        trace
-    }
-
-    /// Execute a step with foreach iteration
-    async fn execute_foreach_step(
-        &self,
-        step: &Step,
-        foreach_str: &str,
-        workspace: &Workspace,
-        substitution: &SubstitutionContext,
-        output_dir: &std::path::Path,
-        progress: Option<&ProgressSender>,
-    ) -> Result<StepOutput> {
-        let start = Instant::now();
-
-        // Parse foreach clause: "source_step as alias"
-        let foreach_clause = ForeachClause::parse(foreach_str).ok_or_else(|| {
-            Error::pack(format!(
-                "Invalid foreach syntax '{}' in step '{}'. Expected: 'step_name as alias'",
-                foreach_str, step.name
-            ))
-        })?;
-
-        // Get source step results
-        let source_rows = substitution
-            .step_results
-            .get(&foreach_clause.source_step)
-            .cloned()
-            .unwrap_or_default();
-
-        // Handle empty source
-        if source_rows.is_empty() {
-            let on_empty = step.on_empty.unwrap_or_default();
-            match on_empty {
-                OnEmpty::Skip => {
-                    debug!(
-                        "Step '{}' skipped: foreach source '{}' is empty",
-                        step.name, foreach_clause.source_step
-                    );
-                    return Ok(StepOutput::empty(start.elapsed()));
-                }
-                OnEmpty::Error => {
-                    return Err(Error::execution(format!(
-                        "Foreach source '{}' is empty for step '{}'",
-                        foreach_clause.source_step, step.name
-                    )));
-                }
-            }
-        }
-
-        let total_iterations = source_rows.len();
-        let mut all_results: Vec<JsonValue> = Vec::new();
-        let mut failed_count = 0;
-        let on_error = step.on_error.unwrap_or_default();
-
-        debug!(
-            "Step '{}' starting foreach over {} rows from '{}'",
-            step.name, total_iterations, foreach_clause.source_step
-        );
-
-        for (index, row) in source_rows.iter().enumerate() {
-            // Emit foreach progress
-            if let Some(tx) = progress {
-                tx.send(super::progress::ProgressUpdate::ForeachProgress {
-                    job_id: tx.job_id(),
-                    step_name: step.name.clone(),
-                    workspace: workspace.name.clone(),
-                    current: index + 1,
-                    total: total_iterations,
-                    timestamp: chrono::Utc::now(),
-                });
-            }
-
-            // Create context with foreach row
-            let mut iter_context = substitution.clone();
-            iter_context.foreach_row = Some((foreach_clause.alias.clone(), row.clone()));
-
-            // Execute single iteration
-            let iter_result = self
-                .execute_step(step, workspace, &iter_context, output_dir)
-                .await;
-
-            match iter_result {
-                Ok(output) => {
-                    // Aggregate results based on strategy
-                    match step.aggregate.unwrap_or_default() {
-                        AggregateStrategy::Append => {
-                            all_results.extend(output.rows);
-                        }
-                        AggregateStrategy::Collect => {
-                            // Wrap each iteration's results as a single array element
-                            all_results.push(serde_json::json!({
-                                "_iteration": index,
-                                "_source_row": row,
-                                "results": output.rows,
-                            }));
-                        }
-                        AggregateStrategy::Merge => {
-                            // For merge, we take the first row from each iteration
-                            if let Some(first) = output.rows.into_iter().next() {
-                                all_results.push(first);
-                            }
-                        }
-                        AggregateStrategy::Replace => {
-                            // Replace keeps only the last iteration's results
-                            all_results = output.rows;
-                        }
-                    }
-                }
-                Err(e) => {
-                    failed_count += 1;
-                    warn!(
-                        "Foreach iteration {}/{} failed for step '{}': {}",
-                        index + 1,
-                        total_iterations,
-                        step.name,
-                        e
-                    );
-
-                    match on_error {
-                        OnError::Fail => {
-                            return Err(Error::execution(format!(
-                                "Foreach iteration {} failed: {}",
-                                index + 1,
-                                e
-                            )));
-                        }
-                        OnError::Skip | OnError::Continue => {
-                            // Continue to next iteration
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-
-        let successful = total_iterations - failed_count;
-        debug!(
-            "Step '{}' foreach completed: {}/{} iterations successful, {} total results",
-            step.name,
-            successful,
-            total_iterations,
-            all_results.len()
-        );
-
-        Ok(StepOutput::from_rows(all_results, start.elapsed()))
     }
 }
 
-#[async_trait]
-impl ExecutionEngine for PackExecutor {
-    type Config = PackExecutorConfig;
-    type Result = PackExecutorResult;
-
-    async fn execute(
-        &self,
-        config: Self::Config,
-        workspaces: Vec<Workspace>,
-        progress: Option<ProgressSender>,
-    ) -> Result<Self::Result> {
-        let start = Instant::now();
-        let job_id = progress
-            .as_ref()
-            .map(|p| p.job_id())
-            .unwrap_or_else(uuid::Uuid::new_v4);
-
-        let num_workspaces = workspaces.len();
-        let total_steps = config.pack.steps.len() * num_workspaces;
-
-        // Notify start
-        if let Some(ref tx) = progress {
-            tx.started(JobType::Query, total_steps, num_workspaces);
-        }
-
-        let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-        let pack = &config.pack;
-
-        info!(
-            "Starting pack '{}' execution across {} workspaces",
-            pack.name, num_workspaces
-        );
-
-        // Execute across workspaces
-        let mut workspace_results: HashMap<String, WorkspaceResult> = HashMap::new();
-
-        for workspace in &workspaces {
-            let result = self
-                .execute_workspace(pack, workspace, &config, &timestamp, progress.as_ref())
-                .await;
-            workspace_results.insert(workspace.workspace_id.clone(), result);
-        }
-
-        // Determine overall status
-        let status = if workspace_results
-            .values()
-            .all(|r| matches!(r.status, ExecutionStatus::Success))
-        {
-            ExecutionStatus::Success
-        } else if workspace_results
-            .values()
-            .all(|r| matches!(r.status, ExecutionStatus::Failed))
-        {
-            ExecutionStatus::Failed
-        } else {
-            ExecutionStatus::Partial
-        };
-
-        // Build execution trace from results
-        let trace = self.build_trace(pack, &workspace_results);
-
-        let result = PackExecutorResult {
-            job_id,
-            pack_name: pack.name.clone(),
-            status,
-            workspace_results,
-            duration_ms: start.elapsed().as_millis() as u64,
-            output_dir: config.output_dir,
-            trace: Some(trace),
-        };
-
-        info!(
-            "Pack '{}' completed: {} succeeded, {} failed in {}ms",
-            pack.name,
-            result.success_count(),
-            result.failure_count(),
-            result.duration_ms
-        );
-
-        // Notify completion
-        if let Some(ref tx) = progress {
-            if result.all_succeeded() {
-                tx.completed(result.duration_ms);
-            } else {
-                tx.failed(format!(
-                    "{} succeeded, {} failed",
-                    result.success_count(),
-                    result.failure_count()
-                ));
-            }
-        }
-
-        Ok(result)
-    }
-
-    fn validate(&self, config: &Self::Config) -> Result<()> {
-        // Validate pack structure
-        config.pack.validate()?;
-
-        // Validate each step with its handler
-        for step in &config.pack.steps {
-            if let Some(handler) = self.get_handler(step.step_type) {
-                handler.validate(step)?;
-            } else {
-                return Err(Error::pack(format!(
-                    "No handler for step type {:?} in step '{}'",
-                    step.step_type, step.name
-                )));
-            }
-        }
-
-        Ok(())
-    }
-
-    fn executor_name(&self) -> &'static str {
-        "PackExecutor"
-    }
+/// Convert acquisition step statuses to StepResult map
+fn convert_step_statuses(
+    statuses: &HashMap<String, super::acquisition::StepExecutionStatus>,
+) -> HashMap<String, StepResult> {
+    statuses
+        .iter()
+        .map(|(name, status)| {
+            (
+                name.clone(),
+                StepResult {
+                    name: name.clone(),
+                    status: match status.status {
+                        super::acquisition::AcquisitionStepStatus::Success => super::types::StepStatus::Success,
+                        super::acquisition::AcquisitionStepStatus::Failed => super::types::StepStatus::Failed,
+                        super::acquisition::AcquisitionStepStatus::Skipped => super::types::StepStatus::Skipped,
+                    },
+                    row_count: status.row_count,
+                    duration_ms: status.duration_ms,
+                    output_path: None,
+                    error: status.error.clone(),
+                },
+            )
+        })
+        .collect()
 }

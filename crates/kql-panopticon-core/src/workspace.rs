@@ -71,6 +71,45 @@ impl Workspace {
 
         None
     }
+
+    pub fn from_resource_id(resource_id: &str) -> Option<Self> {
+        let parts: Vec<&str> = resource_id.split('/').collect();
+        let mut subscription_id = None;
+        let mut resource_group = None;
+        let mut workspace_name = None;
+
+        for (i, part) in parts.iter().enumerate() {
+            match part.to_ascii_lowercase().as_str() {
+                "subscriptions" if i + 1 < parts.len() => {
+                    subscription_id = Some(parts[i + 1].to_string());
+                }
+                "resourcegroups" if i + 1 < parts.len() => {
+                    resource_group = Some(parts[i + 1].to_string());
+                }
+                "workspaces" if i + 1 < parts.len() => {
+                    workspace_name = Some(parts[i + 1].to_string());
+                }
+                _ => {}
+            }
+        }
+
+        if let (Some(sub_id), Some(rg), Some(ws_name)) =
+            (subscription_id, resource_group, workspace_name)
+        {
+            Some(Workspace {
+                workspace_id: String::new(),
+                resource_id: resource_id.to_string(),
+                name: ws_name,
+                location: String::new(),
+                subscription_id: sub_id,
+                resource_group: rg,
+                tenant_id: String::new(),
+                subscription_name: String::new(),
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl std::fmt::Display for Workspace {
@@ -143,6 +182,16 @@ mod tests {
             Workspace::extract_resource_group(resource_id),
             Some("my-rg".to_string())
         );
+    }
+
+    #[test]
+    fn test_from_resource_id() {
+        let resource_id = "/subscriptions/123/resourceGroups/my-rg/providers/Microsoft.OperationalInsights/workspaces/my-ws";
+        let ws = Workspace::from_resource_id(resource_id).unwrap();
+        println!("{:?}", ws);
+        assert_eq!(ws.subscription_id, "123");
+        assert_eq!(ws.resource_group, "my-rg");
+        assert_eq!(ws.name, "my-ws");
     }
 
     #[test]

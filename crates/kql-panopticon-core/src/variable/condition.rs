@@ -7,11 +7,11 @@
 //!
 //! See the [README](./README.md) for complete syntax documentation.
 
-use log::warn;
+use crate::execution::result::ResultContext;
 use regex::Regex;
 use serde_json::Value as JsonValue;
-use std::collections::HashMap;
 use std::sync::LazyLock;
+use tracing::warn;
 
 // Pre-compiled regex patterns for condition parsing
 static RE_ANY: LazyLock<Regex> = LazyLock::new(|| {
@@ -49,7 +49,7 @@ static RE_EMPTY: LazyLock<Regex> = LazyLock::new(|| {
 /// # Arguments
 ///
 /// * `condition` - The condition expression string to evaluate
-/// * `step_results` - Map of step names to their result rows
+/// * `step_results` - Result context with file-backed results
 ///
 /// # Supported Syntax
 ///
@@ -62,35 +62,7 @@ static RE_EMPTY: LazyLock<Regex> = LazyLock::new(|| {
 /// - Predicates: `step.any(field > 0)`, `step.all(field == true)`
 /// - Boolean: `cond1 and cond2`, `cond1 or cond2`, `not cond`
 /// - Operators: `==`, `!=`, `>`, `<`, `>=`, `<=`
-///
-/// # Examples
-///
-/// ```
-/// use std::collections::HashMap;
-/// use kql_panopticon_core::variable::evaluate_condition;
-///
-/// let mut results = HashMap::new();
-/// results.insert("users".to_string(), vec![
-///     serde_json::json!({"name": "Alice", "score": 85}),
-///     serde_json::json!({"name": "Bob", "score": 92}),
-/// ]);
-///
-/// // Check if step has results
-/// assert!(evaluate_condition("users is not empty", &results));
-///
-/// // Check row count
-/// assert!(evaluate_condition("users.length == 2", &results));
-///
-/// // Check first row field
-/// assert!(evaluate_condition("users.first.name == Alice", &results));
-///
-/// // Check if any row matches
-/// assert!(evaluate_condition("users.any(score > 90)", &results));
-/// ```
-pub fn evaluate_condition(
-    condition: &str,
-    step_results: &HashMap<String, Vec<JsonValue>>,
-) -> bool {
+pub fn evaluate_condition(condition: &str, step_results: &ResultContext) -> bool {
     let condition = condition.trim();
 
     // Handle literal true/false
@@ -131,7 +103,8 @@ pub fn evaluate_condition(
 
         let has_rows = step_results
             .get(step_name)
-            .map(|rows| !rows.is_empty())
+            .and_then(|handle| handle.is_empty().ok())
+            .map(|empty| !empty)
             .unwrap_or(false);
 
         return if is_not_empty { has_rows } else { !has_rows };
@@ -144,9 +117,10 @@ pub fn evaluate_condition(
 
         return step_results
             .get(step_name)
-            .map(|rows| {
-                rows.iter()
-                    .any(|row| evaluate_row_condition(inner_condition, row))
+            .and_then(|handle| handle.iter_rows().ok())
+            .map(|iter| {
+                iter.filter_map(|r| r.ok())
+                    .any(|row| evaluate_row_condition(inner_condition, &row))
             })
             .unwrap_or(false);
     }
@@ -158,11 +132,16 @@ pub fn evaluate_condition(
 
         return step_results
             .get(step_name)
-            .map(|rows| {
-                !rows.is_empty()
-                    && rows
-                        .iter()
-                        .all(|row| evaluate_row_condition(inner_condition, row))
+            .and_then(|handle| {
+                let is_empty = handle.is_empty().ok()?;
+                if is_empty {
+                    return Some(false);
+                }
+                let iter = handle.iter_rows().ok()?;
+                Some(
+                    iter.filter_map(|r| r.ok())
+                        .all(|row| evaluate_row_condition(inner_condition, &row)),
+                )
             })
             .unwrap_or(false);
     }
@@ -178,7 +157,7 @@ pub fn evaluate_condition(
             .parse()
             .unwrap_or(0);
 
-        let length = step_results.get(step_name).map(|r| r.len()).unwrap_or(0);
+        let length = step_results.row_count(step_name).unwrap_or(0);
 
         return compare_numbers(length as f64, operator, value as f64);
     }
@@ -191,9 +170,10 @@ pub fn evaluate_condition(
         let expected = captures.get(4).expect("regex group 4").as_str().trim();
 
         return step_results
-            .get(step_name)
-            .and_then(|rows| rows.first())
-            .map(|row| compare_field(row, field, operator, expected))
+            .first_n(step_name, 1)
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .map(|row| compare_field(&row, field, operator, expected))
             .unwrap_or(false);
     }
 
@@ -211,9 +191,10 @@ pub fn evaluate_condition(
         let expected = captures.get(5).expect("regex group 5").as_str().trim();
 
         return step_results
-            .get(step_name)
-            .and_then(|rows| rows.get(index))
-            .map(|row| compare_field(row, field, operator, expected))
+            .first_n(step_name, index + 1)
+            .ok()
+            .and_then(|rows| rows.into_iter().nth(index))
+            .map(|row| compare_field(&row, field, operator, expected))
             .unwrap_or(false);
     }
 
@@ -225,9 +206,10 @@ pub fn evaluate_condition(
         let expected = captures.get(4).expect("regex group 4").as_str().trim();
 
         return step_results
-            .get(step_name)
-            .and_then(|rows| rows.first())
-            .map(|row| compare_field(row, field, operator, expected))
+            .first_n(step_name, 1)
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .map(|row| compare_field(&row, field, operator, expected))
             .unwrap_or(false);
     }
 
@@ -316,13 +298,27 @@ fn compare_numbers(actual: f64, operator: &str, expected: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution::result::ResultWriter;
 
-    fn create_test_results() -> HashMap<String, Vec<JsonValue>> {
-        let mut results = HashMap::new();
+    /// Helper to create a step result handle with test data
+    fn create_test_handle(
+        dir: &std::path::Path,
+        step_name: &str,
+        rows: &[JsonValue],
+    ) -> crate::execution::result::ResultHandle {
+        let path = dir.join(format!("{}.jsonl", step_name));
+        let mut writer = ResultWriter::new(&path, step_name).unwrap();
+        writer.write_rows(rows).unwrap();
+        writer.finish().unwrap()
+    }
 
-        results.insert(
-            "users".to_string(),
-            vec![
+    fn create_test_results(temp_dir: &std::path::Path) -> ResultContext {
+        let mut results = ResultContext::new();
+
+        let users_handle = create_test_handle(
+            temp_dir,
+            "users",
+            &[
                 serde_json::json!({
                     "name": "Alice",
                     "score": 85,
@@ -335,25 +331,26 @@ mod tests {
                 }),
             ],
         );
+        results.insert("users", users_handle);
 
-        results.insert(
-            "empty_step".to_string(),
-            vec![],
-        );
+        let empty_handle = create_test_handle(temp_dir, "empty_step", &[]);
+        results.insert("empty_step", empty_handle);
 
         results
     }
 
     #[test]
     fn test_literals() {
-        let results = create_test_results();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let results = create_test_results(temp_dir.path());
         assert!(evaluate_condition("true", &results));
         assert!(!evaluate_condition("false", &results));
     }
 
     #[test]
     fn test_empty_syntax() {
-        let results = create_test_results();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let results = create_test_results(temp_dir.path());
 
         // users has rows
         assert!(evaluate_condition("users is not empty", &results));
@@ -370,7 +367,8 @@ mod tests {
 
     #[test]
     fn test_length() {
-        let results = create_test_results();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let results = create_test_results(temp_dir.path());
 
         assert!(evaluate_condition("users.length == 2", &results));
         assert!(evaluate_condition("users.length > 1", &results));
@@ -382,7 +380,8 @@ mod tests {
 
     #[test]
     fn test_first_syntax() {
-        let results = create_test_results();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let results = create_test_results(temp_dir.path());
 
         // step.first.field syntax (aligns with {{step.first.field}})
         assert!(evaluate_condition("users.first.name == Alice", &results));
@@ -393,7 +392,8 @@ mod tests {
 
     #[test]
     fn test_field_implicit_first() {
-        let results = create_test_results();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let results = create_test_results(temp_dir.path());
 
         // step.field implicitly uses first row
         assert!(evaluate_condition("users.name == Alice", &results));
@@ -402,7 +402,8 @@ mod tests {
 
     #[test]
     fn test_indexed() {
-        let results = create_test_results();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let results = create_test_results(temp_dir.path());
 
         assert!(evaluate_condition("users[0].name == Alice", &results));
         assert!(evaluate_condition("users[1].name == Bob", &results));
@@ -412,7 +413,8 @@ mod tests {
 
     #[test]
     fn test_any_predicate() {
-        let results = create_test_results();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let results = create_test_results(temp_dir.path());
 
         assert!(evaluate_condition("users.any(score > 90)", &results));
         assert!(evaluate_condition("users.any(active == true)", &results));
@@ -421,7 +423,8 @@ mod tests {
 
     #[test]
     fn test_all_predicate() {
-        let results = create_test_results();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let results = create_test_results(temp_dir.path());
 
         assert!(evaluate_condition("users.all(score > 80)", &results));
         assert!(!evaluate_condition("users.all(active == true)", &results));
@@ -430,7 +433,8 @@ mod tests {
 
     #[test]
     fn test_boolean_operators() {
-        let results = create_test_results();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let results = create_test_results(temp_dir.path());
 
         // AND
         assert!(evaluate_condition(
@@ -459,7 +463,8 @@ mod tests {
 
     #[test]
     fn test_combined_conditions() {
-        let results = create_test_results();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let results = create_test_results(temp_dir.path());
 
         assert!(evaluate_condition(
             "users is not empty and users.any(score > 90)",
@@ -474,7 +479,8 @@ mod tests {
 
     #[test]
     fn test_string_with_quotes() {
-        let results = create_test_results();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let results = create_test_results(temp_dir.path());
 
         assert!(evaluate_condition("users.first.name == \"Alice\"", &results));
         assert!(evaluate_condition("users.first.name == 'Alice'", &results));
@@ -482,7 +488,8 @@ mod tests {
 
     #[test]
     fn test_numeric_comparisons() {
-        let results = create_test_results();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let results = create_test_results(temp_dir.path());
 
         assert!(evaluate_condition("users.first.score == 85", &results));
         assert!(evaluate_condition("users.first.score != 90", &results));
@@ -494,7 +501,8 @@ mod tests {
 
     #[test]
     fn test_unknown_condition() {
-        let results = create_test_results();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let results = create_test_results(temp_dir.path());
 
         // Unknown syntax returns false (with warning logged)
         assert!(!evaluate_condition("invalid syntax here", &results));

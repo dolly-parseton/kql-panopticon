@@ -3,7 +3,7 @@
 //! Contains built-in schemas for common Azure/Sentinel tables.
 
 use super::types::{ColumnDef, TableInfo};
-use log::info;
+use tracing::info;
 
 /// Load all default table schemas into a collection
 pub fn load_defaults() -> Vec<TableInfo> {

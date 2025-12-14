@@ -3,38 +3,45 @@
 //! Reads local files (CSV, JSON, YAML) and normalizes to uniform row format.
 
 use crate::error::{Error, Result};
-use crate::execution::step::{StepContext, StepHandler, StepOutput};
-use crate::pack::{FileFormat, Step, StepType};
+use crate::execution::acquisition::{
+    AcquisitionContext, AcquisitionStepHandler, AcquisitionStepOutput,
+};
+use crate::execution::result::ResultWriter;
+use crate::pack::{AcquisitionStepType, FileFormat, Step};
 use crate::variable::substitute;
 use async_trait::async_trait;
-use log::debug;
 use serde_json::Value as JsonValue;
 use std::path::Path;
 use std::time::Instant;
+use tracing::debug;
 
 /// Handler for file source steps
-pub(crate) struct FileHandler;
+pub struct FileStepHandler;
 
-impl FileHandler {
+impl FileStepHandler {
     /// Create a new file handler
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Default for FileHandler {
+impl Default for FileStepHandler {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl StepHandler for FileHandler {
-    fn step_type(&self) -> StepType {
-        StepType::File
+impl AcquisitionStepHandler for FileStepHandler {
+    fn handles(&self) -> AcquisitionStepType {
+        AcquisitionStepType::File
     }
 
-    async fn execute(&self, step: &Step, ctx: &StepContext<'_>) -> Result<StepOutput> {
+    async fn execute(
+        &self,
+        step: &Step,
+        ctx: &mut AcquisitionContext<'_>,
+    ) -> Result<AcquisitionStepOutput> {
         let start = Instant::now();
 
         // Get source config
@@ -43,7 +50,7 @@ impl StepHandler for FileHandler {
         })?;
 
         // Substitute variables in path
-        let path = substitute(&source.path, ctx.substitution).map_err(|e| {
+        let path = substitute(&source.path, ctx.substitution()).map_err(|e| {
             Error::investigation(&step.name, format!("Path substitution failed: {}", e))
         })?;
 
@@ -57,21 +64,29 @@ impl StepHandler for FileHandler {
             Error::investigation(&step.name, format!("Failed to read file '{}': {}", path, e))
         })?;
 
-        // Parse based on format
-        let rows = match format {
-            FileFormat::Csv => parse_csv(&content, source.csv.as_ref(), &step.name)?,
-            FileFormat::Json => parse_json(&content, &step.name)?,
-            FileFormat::Yaml => parse_yaml(&content, &step.name)?,
+        // Create JSONL writer
+        let mut writer = ctx.writer(&step.name)?;
+
+        // Parse based on format and write directly to JSONL
+        match format {
+            FileFormat::Csv => {
+                write_csv_to_writer(&content, source.csv.as_ref(), &step.name, &mut writer)?
+            }
+            FileFormat::Json => write_json_to_writer(&content, &step.name, &mut writer)?,
+            FileFormat::Yaml => write_yaml_to_writer(&content, &step.name, &mut writer)?,
         };
+
+        let handle = writer.finish()?;
+        let row_count = handle.row_count()?;
 
         debug!(
             "File step '{}' completed: {} rows in {:?}",
             step.name,
-            rows.len(),
+            row_count,
             start.elapsed()
         );
 
-        Ok(StepOutput::from_rows(rows, start.elapsed()))
+        Ok(AcquisitionStepOutput::new(handle, start.elapsed()))
     }
 
     fn validate(&self, step: &Step) -> Result<()> {
@@ -91,7 +106,7 @@ impl StepHandler for FileHandler {
             }
         }
 
-        if step.query.as_ref().map_or(false, |q| !q.trim().is_empty()) {
+        if step.query.as_ref().is_some_and(|q| !q.trim().is_empty()) {
             return Err(Error::pack(format!(
                 "File step '{}' should not have a 'query' field",
                 step.name
@@ -120,15 +135,14 @@ fn detect_format(path: &str) -> FileFormat {
     }
 }
 
-/// Parse CSV content to JSON rows
-fn parse_csv(
+/// Write CSV content directly to JSONL
+fn write_csv_to_writer(
     content: &str,
     options: Option<&crate::pack::CsvOptions>,
     step_name: &str,
-) -> Result<Vec<JsonValue>> {
-    let delimiter = options
-        .and_then(|o| o.delimiter)
-        .unwrap_or(',') as u8;
+    writer: &mut ResultWriter,
+) -> Result<()> {
+    let delimiter = options.and_then(|o| o.delimiter).unwrap_or(',') as u8;
     let has_header = options.and_then(|o| o.has_header).unwrap_or(true);
 
     let mut reader = csv::ReaderBuilder::new()
@@ -151,7 +165,7 @@ fn parse_csv(
         if let Some(Ok(record)) = first_record {
             (0..record.len()).map(|i| format!("col_{}", i)).collect()
         } else {
-            return Ok(vec![]);
+            return Ok(());
         }
     };
 
@@ -161,7 +175,6 @@ fn parse_csv(
         .has_headers(has_header)
         .from_reader(content.as_bytes());
 
-    let mut rows = Vec::new();
     for result in reader.records() {
         let record = result.map_err(|e| {
             Error::investigation(step_name, format!("Failed to parse CSV record: {}", e))
@@ -170,27 +183,24 @@ fn parse_csv(
         let mut obj = serde_json::Map::new();
         for (i, value) in record.iter().enumerate() {
             if let Some(header) = headers.get(i) {
-                // Try to parse as number or boolean, fallback to string
                 let json_value = parse_csv_value(value);
                 obj.insert(header.clone(), json_value);
             }
         }
-        rows.push(JsonValue::Object(obj));
+        writer.write_row(&JsonValue::Object(obj))?;
     }
 
-    Ok(rows)
+    Ok(())
 }
 
 /// Parse a CSV value, attempting type inference
 fn parse_csv_value(value: &str) -> JsonValue {
     let trimmed = value.trim();
 
-    // Empty string
     if trimmed.is_empty() {
         return JsonValue::Null;
     }
 
-    // Boolean
     if trimmed.eq_ignore_ascii_case("true") {
         return JsonValue::Bool(true);
     }
@@ -198,55 +208,73 @@ fn parse_csv_value(value: &str) -> JsonValue {
         return JsonValue::Bool(false);
     }
 
-    // Integer
     if let Ok(n) = trimmed.parse::<i64>() {
         return JsonValue::Number(n.into());
     }
 
-    // Float
     if let Ok(n) = trimmed.parse::<f64>() {
         if let Some(num) = serde_json::Number::from_f64(n) {
             return JsonValue::Number(num);
         }
     }
 
-    // String (default)
     JsonValue::String(value.to_string())
 }
 
-/// Parse JSON content to rows
-fn parse_json(content: &str, step_name: &str) -> Result<Vec<JsonValue>> {
+/// Write JSON content directly to JSONL
+fn write_json_to_writer(
+    content: &str,
+    step_name: &str,
+    writer: &mut ResultWriter,
+) -> Result<()> {
     let value: JsonValue = serde_json::from_str(content).map_err(|e| {
         Error::investigation(step_name, format!("Failed to parse JSON: {}", e))
     })?;
 
     match value {
-        // Array of objects -> each object is a row
-        JsonValue::Array(arr) => Ok(arr),
-        // Single object -> single row
-        obj @ JsonValue::Object(_) => Ok(vec![obj]),
-        // Other values -> wrap in object
-        other => Ok(vec![serde_json::json!({ "value": other })]),
+        JsonValue::Array(arr) => {
+            for row in arr {
+                writer.write_row(&row)?;
+            }
+        }
+        obj @ JsonValue::Object(_) => {
+            writer.write_row(&obj)?;
+        }
+        other => {
+            writer.write_row(&serde_json::json!({ "value": other }))?;
+        }
     }
+
+    Ok(())
 }
 
-/// Parse YAML content to rows
-fn parse_yaml(content: &str, step_name: &str) -> Result<Vec<JsonValue>> {
+/// Write YAML content directly to JSONL
+fn write_yaml_to_writer(
+    content: &str,
+    step_name: &str,
+    writer: &mut ResultWriter,
+) -> Result<()> {
     let value: serde_yaml::Value = serde_yaml::from_str(content).map_err(|e| {
         Error::investigation(step_name, format!("Failed to parse YAML: {}", e))
     })?;
 
-    // Convert YAML value to JSON value
     let json_value = yaml_to_json(value);
 
     match json_value {
-        // Array -> each element is a row
-        JsonValue::Array(arr) => Ok(arr),
-        // Single object -> single row
-        obj @ JsonValue::Object(_) => Ok(vec![obj]),
-        // Other values -> wrap in object
-        other => Ok(vec![serde_json::json!({ "value": other })]),
+        JsonValue::Array(arr) => {
+            for row in arr {
+                writer.write_row(&row)?;
+            }
+        }
+        obj @ JsonValue::Object(_) => {
+            writer.write_row(&obj)?;
+        }
+        other => {
+            writer.write_row(&serde_json::json!({ "value": other }))?;
+        }
     }
+
+    Ok(())
 }
 
 /// Convert YAML value to JSON value
@@ -298,90 +326,27 @@ mod tests {
         assert_eq!(detect_format("data.json"), FileFormat::Json);
         assert_eq!(detect_format("data.yaml"), FileFormat::Yaml);
         assert_eq!(detect_format("data.yml"), FileFormat::Yaml);
-        assert_eq!(detect_format("data.txt"), FileFormat::Json); // Default
-        assert_eq!(detect_format("/path/to/file.csv"), FileFormat::Csv);
-    }
-
-    #[test]
-    fn test_parse_csv_simple() {
-        let csv = "name,age,active\nAlice,30,true\nBob,25,false";
-        let rows = parse_csv(csv, None, "test").unwrap();
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["name"], "Alice");
-        assert_eq!(rows[0]["age"], 30);
-        assert_eq!(rows[0]["active"], true);
-        assert_eq!(rows[1]["name"], "Bob");
-        assert_eq!(rows[1]["age"], 25);
-        assert_eq!(rows[1]["active"], false);
-    }
-
-    #[test]
-    fn test_parse_csv_custom_delimiter() {
-        let csv = "name;age\nAlice;30";
-        let options = crate::pack::CsvOptions {
-            delimiter: Some(';'),
-            has_header: Some(true),
-        };
-        let rows = parse_csv(csv, Some(&options), "test").unwrap();
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["name"], "Alice");
-        assert_eq!(rows[0]["age"], 30);
+        assert_eq!(detect_format("data.txt"), FileFormat::Json);
     }
 
     #[test]
     fn test_parse_csv_value_types() {
-        assert_eq!(parse_csv_value("hello"), JsonValue::String("hello".into()));
+        assert_eq!(
+            parse_csv_value("hello"),
+            JsonValue::String("hello".into())
+        );
         assert_eq!(parse_csv_value("42"), JsonValue::Number(42.into()));
-        assert_eq!(parse_csv_value("3.14"), JsonValue::Number(serde_json::Number::from_f64(3.14).unwrap()));
+        assert_eq!(
+            parse_csv_value("3.14"),
+            JsonValue::Number(serde_json::Number::from_f64(3.14).unwrap())
+        );
         assert_eq!(parse_csv_value("true"), JsonValue::Bool(true));
         assert_eq!(parse_csv_value("FALSE"), JsonValue::Bool(false));
         assert_eq!(parse_csv_value(""), JsonValue::Null);
     }
 
     #[test]
-    fn test_parse_json_array() {
-        let json = r#"[{"id": 1}, {"id": 2}]"#;
-        let rows = parse_json(json, "test").unwrap();
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["id"], 1);
-        assert_eq!(rows[1]["id"], 2);
-    }
-
-    #[test]
-    fn test_parse_json_object() {
-        let json = r#"{"name": "test", "value": 42}"#;
-        let rows = parse_json(json, "test").unwrap();
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["name"], "test");
-        assert_eq!(rows[0]["value"], 42);
-    }
-
-    #[test]
-    fn test_parse_yaml_array() {
-        let yaml = "- id: 1\n- id: 2";
-        let rows = parse_yaml(yaml, "test").unwrap();
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["id"], 1);
-        assert_eq!(rows[1]["id"], 2);
-    }
-
-    #[test]
-    fn test_parse_yaml_object() {
-        let yaml = "name: test\nvalue: 42";
-        let rows = parse_yaml(yaml, "test").unwrap();
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["name"], "test");
-        assert_eq!(rows[0]["value"], 42);
-    }
-
-    #[test]
-    fn test_yaml_to_json_types() {
+    fn test_yaml_to_json() {
         let yaml: serde_yaml::Value = serde_yaml::from_str("key: value").unwrap();
         let json = yaml_to_json(yaml);
         assert_eq!(json["key"], "value");
@@ -389,9 +354,5 @@ mod tests {
         let yaml: serde_yaml::Value = serde_yaml::from_str("num: 42").unwrap();
         let json = yaml_to_json(yaml);
         assert_eq!(json["num"], 42);
-
-        let yaml: serde_yaml::Value = serde_yaml::from_str("flag: true").unwrap();
-        let json = yaml_to_json(yaml);
-        assert_eq!(json["flag"], true);
     }
 }

@@ -4,7 +4,7 @@ use super::defaults;
 use super::types::{ColumnDef, RegistryData, SchemaType, TableInfo, WorkspaceSchema};
 use crate::error::{Error, Result};
 use chrono::Duration;
-use log::{debug, info};
+use tracing::{debug, info};
 use std::path::{Path, PathBuf};
 
 /// Default staleness threshold (30 days)

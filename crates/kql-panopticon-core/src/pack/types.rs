@@ -6,11 +6,26 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Input value type
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputType {
+    /// Single string value (default)
+    #[default]
+    String,
+    /// Array of strings (comma-separated input, quoted in substitution)
+    Array,
+}
+
 /// User-provided input definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Input {
     /// Input name (used in {{inputs.name}})
     pub name: String,
+
+    /// Input type (string or array)
+    #[serde(default, rename = "type")]
+    pub input_type: InputType,
 
     /// Human-readable label
     #[serde(default)]
@@ -120,15 +135,21 @@ pub enum ExampleValue {
     Array(Vec<String>),
 }
 
-/// Step type
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Acquisition step type (KQL, HTTP, File)
+///
+/// This is used in pack definitions for the `type` field of acquisition steps.
+/// For execution-layer types, see `execution::StepType`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum StepType {
+pub enum AcquisitionStepType {
     #[default]
     Kql,
     Http,
     File,
 }
+
+// Re-export as StepType for backward compatibility with Step struct
+pub use AcquisitionStepType as StepType;
 
 /// HTTP request configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -352,107 +373,8 @@ pub struct SecretsConfig {
     pub secrets: HashMap<String, String>,
 }
 
-/// Report generation configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReportConfig {
-    /// Report format
-    #[serde(default)]
-    pub format: Option<ReportFormat>,
-
-    /// Output filename
-    #[serde(default)]
-    pub output: Option<String>,
-
-    /// Template content
-    #[serde(default)]
-    pub template: Option<String>,
-
-    /// Template file path
-    #[serde(default)]
-    pub template_file: Option<String>,
-
-    /// Verdict rules
-    #[serde(default)]
-    pub verdict_rules: Vec<VerdictRule>,
-}
-
-/// Report format
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ReportFormat {
-    #[default]
-    Markdown,
-    Html,
-    Json,
-}
-
-/// Verdict rule
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerdictRule {
-    /// Rule name
-    pub name: String,
-
-    /// Condition expression
-    pub condition: String,
-
-    /// Verdict level
-    pub level: String,
-
-    /// Summary message
-    #[serde(default)]
-    pub summary: Option<String>,
-
-    /// Recommendation
-    #[serde(default)]
-    pub recommendation: Option<String>,
-}
-
-/// Scoring configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScoringConfig {
-    /// Weighted indicators
-    #[serde(default)]
-    pub indicators: Vec<ScoringIndicator>,
-
-    /// Score thresholds
-    #[serde(default)]
-    pub thresholds: Vec<ScoringThreshold>,
-}
-
-/// Scoring indicator
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScoringIndicator {
-    /// Indicator name
-    pub name: String,
-
-    /// Condition expression
-    pub condition: String,
-
-    /// Weight (positive = risk, negative = benign)
-    pub weight: i32,
-
-    /// Description
-    #[serde(default)]
-    pub description: Option<String>,
-}
-
-/// Score threshold
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScoringThreshold {
-    /// Level name
-    pub level: String,
-
-    /// Minimum score
-    pub min_score: i32,
-
-    /// Summary template
-    #[serde(default)]
-    pub summary: Option<String>,
-
-    /// Recommendation template
-    #[serde(default)]
-    pub recommendation: Option<String>,
-}
+// Note: ReportConfig, ScoringConfig and related types have been moved to
+// pack/reporting.rs and pack/processing.rs respectively.
 
 /// Parsed foreach clause
 #[derive(Debug, Clone)]

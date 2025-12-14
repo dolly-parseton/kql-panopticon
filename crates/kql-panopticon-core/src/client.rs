@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::workspace::{Workspace, WorkspaceListResponse};
 use azure_core::auth::TokenCredential;
 use azure_identity::AzureCliCredential;
-use log::warn;
+use tracing::warn;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -48,7 +48,7 @@ pub struct QueryResponse {
 /// Table in query response
 #[derive(Deserialize, Debug, Clone)]
 pub struct Table {
-    #[allow(dead_code)]
+    
     pub name: String,
     pub columns: Vec<Column>,
     pub rows: Vec<serde_json::Value>,
@@ -69,7 +69,7 @@ pub struct Subscription {
     pub subscription_id: String,
     #[serde(rename = "displayName")]
     pub display_name: String,
-    #[allow(dead_code)]
+    
     pub state: String,
     #[serde(rename = "tenantId")]
     pub tenant_id: String,
@@ -97,14 +97,14 @@ struct AzureError {
 
 #[derive(Deserialize, Debug)]
 struct AzureErrorDetail {
-    #[allow(dead_code)]
+    
     code: Option<String>,
     message: String,
 }
 
 #[derive(Deserialize, Debug)]
 struct AzureInnerError {
-    #[allow(dead_code)]
+    
     code: Option<String>,
     message: Option<String>,
 }
@@ -120,7 +120,7 @@ impl Client {
     }
 
     /// Create a new client with a custom validation interval
-    #[allow(dead_code)]
+    
     pub fn with_validation_interval(validation_interval: Duration) -> Result<Self> {
         Self::with_config(validation_interval, Duration::from_secs(30), 0)
     }
@@ -240,13 +240,13 @@ impl Client {
                     cached_token.expires_at.duration_since(SystemTime::now())
                 {
                     if time_until_expiry > TOKEN_REFRESH_BUFFER {
-                        log::debug!(
+                        tracing::debug!(
                             "Using cached Log Analytics token (expires in {:?})",
                             time_until_expiry
                         );
                         return Ok(cached_token.token.clone());
                     } else {
-                        log::debug!(
+                        tracing::debug!(
                             "Cached token expiring soon (in {:?}), refreshing",
                             time_until_expiry
                         );
@@ -256,7 +256,7 @@ impl Client {
         }
 
         // No valid cached token, fetch a new one
-        log::debug!("Fetching new Log Analytics token");
+        tracing::debug!("Fetching new Log Analytics token");
         let token = self
             .credential
             .get_token(&["https://api.loganalytics.io/.default"])
@@ -280,7 +280,7 @@ impl Client {
             });
 
             if let Ok(duration) = expires_at.duration_since(SystemTime::now()) {
-                log::debug!("Cached new token (expires in {:?})", duration);
+                tracing::debug!("Cached new token (expires in {:?})", duration);
             }
         }
 

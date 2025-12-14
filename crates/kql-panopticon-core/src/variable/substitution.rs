@@ -5,7 +5,8 @@
 
 use super::{VarRef, VarRefType};
 use crate::error::{Error, Result};
-use crate::pack::{ExampleValue, QuoteStyle};
+use crate::execution::result::ResultContext;
+use crate::pack::{ExampleValue, InputType, QuoteStyle};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
@@ -15,8 +16,11 @@ pub struct SubstitutionContext {
     /// User-provided inputs
     pub inputs: HashMap<String, String>,
 
-    /// Step results (step_name -> rows as JSON objects)
-    pub step_results: HashMap<String, Vec<JsonValue>>,
+    /// Input types (for array vs string handling)
+    pub input_types: HashMap<String, InputType>,
+
+    /// Step results (file-backed via handles)
+    pub step_results: ResultContext,
 
     /// Current foreach row (alias -> row data)
     pub foreach_row: Option<(String, JsonValue)>,
@@ -40,13 +44,38 @@ impl SubstitutionContext {
         self
     }
 
-    /// Add step results
-    pub fn with_step_results(
+    /// Add an input value with its type
+    pub fn with_typed_input(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+        input_type: InputType,
+    ) -> Self {
+        let name = name.into();
+        self.inputs.insert(name.clone(), value.into());
+        self.input_types.insert(name, input_type);
+        self
+    }
+
+    /// Set input type for an existing input
+    pub fn with_input_type(mut self, name: impl Into<String>, input_type: InputType) -> Self {
+        self.input_types.insert(name.into(), input_type);
+        self
+    }
+
+    /// Add step result handle
+    pub fn with_step_handle(
         mut self,
         step: impl Into<String>,
-        results: Vec<JsonValue>,
+        handle: crate::execution::result::ResultHandle,
     ) -> Self {
-        self.step_results.insert(step.into(), results);
+        self.step_results.insert(step.into(), handle);
+        self
+    }
+
+    /// Set step results context
+    pub fn with_step_results_context(mut self, context: ResultContext) -> Self {
+        self.step_results = context;
         self
     }
 
@@ -80,11 +109,27 @@ impl SubstitutionContext {
         quote_style: QuoteStyle,
     ) -> Result<String> {
         match &var_ref.ref_type {
-            VarRefType::Input { name } => self
-                .inputs
-                .get(name)
-                .cloned()
-                .ok_or_else(|| Error::variable(format!("Input '{}' not found", name))),
+            VarRefType::Input { name } => {
+                let value = self
+                    .inputs
+                    .get(name)
+                    .ok_or_else(|| Error::variable(format!("Input '{}' not found", name)))?;
+
+                // Check if this input is typed as an array
+                let input_type = self.input_types.get(name).copied().unwrap_or_default();
+                match input_type {
+                    InputType::String => Ok(value.clone()),
+                    InputType::Array => {
+                        // Split comma-separated values and format with quotes
+                        let values: Vec<String> = value
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        Ok(quote_style.format_array(&values))
+                    }
+                }
+            }
 
             VarRefType::Secret { name } => self
                 .secrets
@@ -145,17 +190,11 @@ impl SubstitutionContext {
 
     /// Get all values from a column in step results
     fn get_column_values(&self, step: &str, column: &str) -> Result<Vec<String>> {
-        let results = self.step_results.get(step).ok_or_else(|| {
-            Error::variable(format!("Step '{}' not found in results", step))
-        })?;
+        if !self.step_results.contains(step) {
+            return Err(Error::variable(format!("Step '{}' not found in results", step)));
+        }
 
-        let values: Vec<String> = results
-            .iter()
-            .map(|row| extract_json_value(row, column))
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        Ok(values)
+        self.step_results.column_values(step, column)
     }
 }
 
@@ -309,6 +348,19 @@ fn extract_json_value(row: &JsonValue, column: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution::result::ResultWriter;
+
+    /// Helper to create a step result handle with test data
+    fn create_test_handle(
+        dir: &std::path::Path,
+        step_name: &str,
+        rows: &[serde_json::Value],
+    ) -> crate::execution::result::ResultHandle {
+        let path = dir.join(format!("{}.jsonl", step_name));
+        let mut writer = ResultWriter::new(&path, step_name).unwrap();
+        writer.write_rows(rows).unwrap();
+        writer.finish().unwrap()
+    }
 
     #[test]
     fn test_substitute_input() {
@@ -326,23 +378,25 @@ mod tests {
 
     #[test]
     fn test_substitute_step_array() {
+        let temp_dir = tempfile::tempdir().unwrap();
         let results = vec![
             serde_json::json!({"id": "1", "name": "Alice"}),
             serde_json::json!({"id": "2", "name": "Bob"}),
         ];
 
-        let context = SubstitutionContext::new().with_step_results("users", results);
+        let handle = create_test_handle(temp_dir.path(), "users", &results);
+        let context = SubstitutionContext::new().with_step_handle("users", handle);
         let result = substitute("WHERE id IN ({{users.*.id}})", &context).unwrap();
         assert_eq!(result, "WHERE id IN ('1','2')");
     }
 
     #[test]
     fn test_substitute_step_first() {
-        let results = vec![
-            serde_json::json!({"id": "1", "name": "Alice"}),
-        ];
+        let temp_dir = tempfile::tempdir().unwrap();
+        let results = vec![serde_json::json!({"id": "1", "name": "Alice"})];
 
-        let context = SubstitutionContext::new().with_step_results("users", results);
+        let handle = create_test_handle(temp_dir.path(), "users", &results);
+        let context = SubstitutionContext::new().with_step_handle("users", handle);
         let result = substitute("WHERE id = {{users.first.id}}", &context).unwrap();
         assert_eq!(result, "WHERE id = '1'");
     }
@@ -409,15 +463,41 @@ mod tests {
             .with_quote_style(QuoteStyle::Single);
 
         let result = substitute("WHERE name = {{inputs.name}}", &context).unwrap();
+        // String inputs are returned raw (no quoting)
         assert_eq!(result, "WHERE name = O'Brien");
+    }
 
-        // With explicit quoting
-        let result = substitute_with_quote_style(
-            "WHERE name = {{inputs.name}}",
-            &context,
-            QuoteStyle::Single,
-        ).unwrap();
-        // Note: inputs are returned raw, quoting is for step results
-        assert_eq!(result, "WHERE name = O'Brien");
+    #[test]
+    fn test_array_input_type() {
+        // Array inputs are split and quoted
+        let context = SubstitutionContext::new()
+            .with_typed_input("ips", "8.8.8.8, 1.1.1.1", InputType::Array)
+            .with_quote_style(QuoteStyle::Single);
+
+        let result = substitute("dynamic([{{inputs.ips}}])", &context).unwrap();
+        assert_eq!(result, "dynamic(['8.8.8.8','1.1.1.1'])");
+    }
+
+    #[test]
+    fn test_array_input_single_value() {
+        // Single value in array input
+        let context = SubstitutionContext::new()
+            .with_typed_input("ip", "8.8.8.8", InputType::Array)
+            .with_quote_style(QuoteStyle::Single);
+
+        let result = substitute("dynamic([{{inputs.ip}}])", &context).unwrap();
+        assert_eq!(result, "dynamic(['8.8.8.8'])");
+    }
+
+    #[test]
+    fn test_string_input_default() {
+        // Without explicit type, inputs are strings (raw)
+        let context = SubstitutionContext::new()
+            .with_input("value", "test,value")
+            .with_quote_style(QuoteStyle::Single);
+
+        let result = substitute("{{inputs.value}}", &context).unwrap();
+        // String type (default) returns raw value without splitting
+        assert_eq!(result, "test,value");
     }
 }

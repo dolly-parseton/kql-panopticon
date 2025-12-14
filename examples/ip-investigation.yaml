@@ -1,0 +1,94 @@
+# IP Investigation Pack
+#
+# Demonstrates pack features: inputs, dependencies, and conditional execution.
+# Investigates IP addresses by correlating sign-in activity.
+#
+# Usage:
+#   pack-runner examples/ip-investigation.yaml --input ip_list=8.8.8.8
+#   pack-runner examples/ip-investigation.yaml --input ip_list=8.8.8.8,1.1.1.1 --input days=14
+
+name: IP Investigation
+description: |
+  Investigate IP addresses across Azure sign-in logs.
+  Correlates sign-ins, users, and security alerts.
+version: "1.0"
+
+acquisition:
+  inputs:
+    - name: ip_list
+      type: array
+      label: IP Addresses
+      description: Comma-separated list of IP addresses to investigate
+      required: true
+      example: "10.0.0.1,192.168.1.100"
+
+    - name: days
+      label: Lookback Days
+      description: Number of days to search back
+      required: false
+      default: "7"
+      example: "7"
+
+  steps:
+    # Step 1: Find sign-ins from the specified IPs
+    - name: signin_activity
+      type: kql
+      query: |
+        let target_ips = dynamic([{{inputs.ip_list}}]);
+        SigninLogs
+        | where TimeGenerated > ago({{inputs.days}}d)
+        | where IPAddress in (target_ips)
+        | summarize
+            SigninCount = count(),
+            SuccessCount = countif(ResultType == "0"),
+            FailedCount = countif(ResultType != "0"),
+            UniqueUsers = dcount(UserPrincipalName),
+            Users = make_set(UserPrincipalName, 10),
+            Apps = make_set(AppDisplayName, 10),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated)
+          by IPAddress, Location
+        | order by SigninCount desc
+      timespan: P30D
+
+    # Step 2: Get users affected by these IPs (only if step 1 found results)
+    - name: affected_users
+      type: kql
+      depends_on: [signin_activity]
+      when: "signin_activity is not empty"
+      query: |
+        let target_ips = dynamic([{{signin_activity.*.IPAddress}}]);
+        SigninLogs
+        | where TimeGenerated > ago({{inputs.days}}d)
+        | where IPAddress in (target_ips)
+        | summarize
+            SigninCount = count(),
+            IPs = make_set(IPAddress, 5),
+            Apps = make_set(AppDisplayName, 5),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated)
+          by UserPrincipalName
+        | order by SigninCount desc
+      timespan: P30D
+
+    # Step 3: Get detailed sign-in timeline for affected users
+    - name: signin_timeline
+      type: kql
+      depends_on: [affected_users]
+      when: "affected_users is not empty"
+      query: |
+        let users = dynamic([{{affected_users.*.UserPrincipalName}}]);
+        SigninLogs
+        | where TimeGenerated > ago({{inputs.days}}d)
+        | where UserPrincipalName in (users)
+        | project
+            TimeGenerated,
+            UserPrincipalName,
+            IPAddress,
+            AppDisplayName,
+            ResultType,
+            ResultDescription,
+            Location
+        | order by TimeGenerated desc
+        | take 100
+      timespan: P30D

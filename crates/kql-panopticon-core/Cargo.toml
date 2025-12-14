@@ -40,15 +40,20 @@ csv.workspace = true
 regex.workspace = true
 walkdir.workspace = true
 dirs.workspace = true
-log.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 uuid.workspace = true
 
 # Templating & extraction
 tera.workspace = true
 jsonpath_lib.workspace = true
 
+# Data processing
+polars.workspace = true
+
 # KQL validation via FFI (Kusto.Language)
 kql-language-ffi = { path = "../kql-language-ffi" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3.19"

@@ -36,6 +36,23 @@ pub enum ProgressUpdate {
         timestamp: DateTime<Utc>,
     },
 
+    // === Workspace Lifecycle Events ===
+
+    /// Workspace execution started
+    WorkspaceStarted {
+        job_id: Uuid,
+        workspace: String,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Workspace execution completed
+    WorkspaceCompleted {
+        job_id: Uuid,
+        workspace: String,
+        duration_ms: u64,
+        timestamp: DateTime<Utc>,
+    },
+
     // === Step-Level Events ===
 
     /// A step/query has started
@@ -43,6 +60,7 @@ pub enum ProgressUpdate {
         job_id: Uuid,
         step_name: String,
         workspace: String,
+        phase: ExecutionPhase,
         timestamp: DateTime<Utc>,
     },
 
@@ -51,6 +69,7 @@ pub enum ProgressUpdate {
         job_id: Uuid,
         step_name: String,
         workspace: String,
+        phase: ExecutionPhase,
         rows: usize,
         duration_ms: u64,
         timestamp: DateTime<Utc>,
@@ -61,6 +80,7 @@ pub enum ProgressUpdate {
         job_id: Uuid,
         step_name: String,
         workspace: String,
+        phase: ExecutionPhase,
         error: String,
         timestamp: DateTime<Utc>,
     },
@@ -70,6 +90,7 @@ pub enum ProgressUpdate {
         job_id: Uuid,
         step_name: String,
         workspace: String,
+        phase: ExecutionPhase,
         reason: String,
         timestamp: DateTime<Utc>,
     },
@@ -131,6 +152,8 @@ impl ProgressUpdate {
             Self::Started { job_id, .. }
             | Self::Completed { job_id, .. }
             | Self::Failed { job_id, .. }
+            | Self::WorkspaceStarted { job_id, .. }
+            | Self::WorkspaceCompleted { job_id, .. }
             | Self::StepStarted { job_id, .. }
             | Self::StepCompleted { job_id, .. }
             | Self::StepFailed { job_id, .. }
@@ -149,6 +172,8 @@ impl ProgressUpdate {
             Self::Started { timestamp, .. }
             | Self::Completed { timestamp, .. }
             | Self::Failed { timestamp, .. }
+            | Self::WorkspaceStarted { timestamp, .. }
+            | Self::WorkspaceCompleted { timestamp, .. }
             | Self::StepStarted { timestamp, .. }
             | Self::StepCompleted { timestamp, .. }
             | Self::StepFailed { timestamp, .. }
@@ -190,6 +215,28 @@ impl std::fmt::Display for JobType {
         match self {
             Self::Query => write!(f, "Query"),
             Self::Investigation => write!(f, "Investigation"),
+        }
+    }
+}
+
+/// Execution phase for progress tracking
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecutionPhase {
+    /// Data acquisition phase (KQL, HTTP, File steps)
+    #[default]
+    Acquisition,
+    /// Data processing phase (scoring, transforms)
+    Processing,
+    /// Report generation phase (templates)
+    Reporting,
+}
+
+impl std::fmt::Display for ExecutionPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Acquisition => write!(f, "Acquisition"),
+            Self::Processing => write!(f, "Processing"),
+            Self::Reporting => write!(f, "Reporting"),
         }
     }
 }
@@ -248,12 +295,37 @@ impl ProgressSender {
         });
     }
 
+    /// Send workspace started event
+    pub fn workspace_started(&self, workspace: impl Into<String>) {
+        self.send(ProgressUpdate::WorkspaceStarted {
+            job_id: self.job_id,
+            workspace: workspace.into(),
+            timestamp: Utc::now(),
+        });
+    }
+
+    /// Send workspace completed event
+    pub fn workspace_completed(&self, workspace: impl Into<String>, duration_ms: u64) {
+        self.send(ProgressUpdate::WorkspaceCompleted {
+            job_id: self.job_id,
+            workspace: workspace.into(),
+            duration_ms,
+            timestamp: Utc::now(),
+        });
+    }
+
     /// Send step started event
-    pub fn step_started(&self, step_name: impl Into<String>, workspace: impl Into<String>) {
+    pub fn step_started(
+        &self,
+        step_name: impl Into<String>,
+        workspace: impl Into<String>,
+        phase: ExecutionPhase,
+    ) {
         self.send(ProgressUpdate::StepStarted {
             job_id: self.job_id,
             step_name: step_name.into(),
             workspace: workspace.into(),
+            phase,
             timestamp: Utc::now(),
         });
     }
@@ -263,6 +335,7 @@ impl ProgressSender {
         &self,
         step_name: impl Into<String>,
         workspace: impl Into<String>,
+        phase: ExecutionPhase,
         rows: usize,
         duration_ms: u64,
     ) {
@@ -270,6 +343,7 @@ impl ProgressSender {
             job_id: self.job_id,
             step_name: step_name.into(),
             workspace: workspace.into(),
+            phase,
             rows,
             duration_ms,
             timestamp: Utc::now(),
@@ -281,12 +355,14 @@ impl ProgressSender {
         &self,
         step_name: impl Into<String>,
         workspace: impl Into<String>,
+        phase: ExecutionPhase,
         error: impl Into<String>,
     ) {
         self.send(ProgressUpdate::StepFailed {
             job_id: self.job_id,
             step_name: step_name.into(),
             workspace: workspace.into(),
+            phase,
             error: error.into(),
             timestamp: Utc::now(),
         });
@@ -297,12 +373,14 @@ impl ProgressSender {
         &self,
         step_name: impl Into<String>,
         workspace: impl Into<String>,
+        phase: ExecutionPhase,
         reason: impl Into<String>,
     ) {
         self.send(ProgressUpdate::StepSkipped {
             job_id: self.job_id,
             step_name: step_name.into(),
             workspace: workspace.into(),
+            phase,
             reason: reason.into(),
             timestamp: Utc::now(),
         });
@@ -311,6 +389,24 @@ impl ProgressSender {
     /// Send debug message
     pub fn debug(&self, message: impl Into<String>) {
         self.send(ProgressUpdate::debug(self.job_id, message));
+    }
+
+    /// Send foreach progress event
+    pub fn foreach_progress(
+        &self,
+        step_name: impl Into<String>,
+        workspace: impl Into<String>,
+        current: usize,
+        total: usize,
+    ) {
+        self.send(ProgressUpdate::ForeachProgress {
+            job_id: self.job_id,
+            step_name: step_name.into(),
+            workspace: workspace.into(),
+            current,
+            total,
+            timestamp: Utc::now(),
+        });
     }
 }
 
@@ -333,8 +429,10 @@ mod tests {
         let (sender, mut receiver) = progress_channel(job_id);
 
         sender.started(JobType::Query, 5, 3);
-        sender.step_started("query1", "workspace1");
-        sender.step_completed("query1", "workspace1", 100, 500);
+        sender.workspace_started("workspace1");
+        sender.step_started("query1", "workspace1", ExecutionPhase::Acquisition);
+        sender.step_completed("query1", "workspace1", ExecutionPhase::Acquisition, 100, 500);
+        sender.workspace_completed("workspace1", 600);
         sender.completed(1000);
 
         let mut count = 0;
@@ -343,6 +441,6 @@ mod tests {
             count += 1;
         }
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 6);
     }
 }

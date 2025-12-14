@@ -6,24 +6,38 @@
 //!
 //! This library provides the foundational components for:
 //! - Azure Log Analytics client with token caching and workspace discovery
-//! - Pack execution with dependency ordering and variable substitution
-//! - Result storage and retrieval
+//! - Three-phase pack execution: Acquisition → Processing → Reporting
+//! - File-backed result storage for memory efficiency
 //!
 //! ## Architecture
 //!
+//! ```text
+//! PackExecutor (orchestrator)
+//!   ├── AcquisitionPhaseHandler  → Data collection (per workspace)
+//!   │     ├── KqlStepHandler     → Azure Log Analytics queries
+//!   │     ├── HttpStepHandler    → External API calls
+//!   │     └── FileStepHandler    → Local file reads
+//!   ├── ProcessingPhaseHandler   → Data transformation (global)
+//!   │     └── ScoringStepHandler → Risk scoring
+//!   └── ReportingPhaseHandler    → Output generation (global)
+//!         └── TemplateStepHandler → Tera template rendering
+//! ```
+//!
+//! ## Modules
+//!
 //! - [`client`] - Azure authentication and Log Analytics API client
 //! - [`workspace`] - Workspace discovery and management
-//! - [`pack`] - Pack definitions (queries with optional dependencies)
-//! - [`execution`] - Pack execution engine
+//! - [`pack`] - Pack definitions (queries, processing, reporting)
+//! - [`execution`] - Three-phase pack execution engine
 //! - [`variable`] - Variable parsing and substitution
-//! - [`result`] - Result storage and formats
-//! - [`report`] - Report generation with templating
+//! - [`schema`] - Workspace schema caching and column discovery
+//! - [`tracing`] - Execution tracing and TUI event layer
 //! - [`validation`] - KQL syntax validation (optional feature)
 //!
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use kql_panopticon_core::{Client, Pack, PackExecutor, ExecutionEngine};
+//! use kql_panopticon_core::{Client, Pack, PackExecutor, PackExecutorConfig};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,50 +57,125 @@
 //! }
 //! ```
 
-// Re-export core types at crate root
+// ============================================================================
+// Core Re-exports
+// ============================================================================
+
+// Client and Azure types
 pub use client::{Client, Column, QueryResponse, Subscription, Table};
 pub use error::{Error, Result};
 pub use workspace::{Workspace, WorkspaceListResponse, WorkspaceProperties, WorkspaceResource};
 
-// Re-export pack types
+// ============================================================================
+// Pack Definition Types
+// ============================================================================
+
 pub use pack::{
-    Pack, Step, StepType, Input,
-    HttpRequest, HttpResponse, HttpMethod, AuthMethod,
-    AggregateStrategy, OnEmpty, OnError, QuoteStyle,
-    OutputConfig, SecretsConfig, ReportConfig, ScoringConfig,
+    // Core pack structure
+    Acquisition, Pack, Processing, Reporting,
+    // Acquisition types
+    AcquisitionStepType, AggregateStrategy, AuthMethod, HttpMethod, HttpRequest,
+    HttpResponse, Input, InputType, OnEmpty, OnError, OutputConfig, QuoteStyle,
+    SecretsConfig, Step, StepType,
+    // Processing types
+    MatchedIndicator, ProcessingStep, ProcessingStepConfig, ScoringConfig,
+    ScoringIndicator, ScoringResult, ScoringThreshold,
+    // Reporting types
+    ReportDefinition, ReportFormat,
 };
 
-// Re-export execution types
+// ============================================================================
+// Execution Engine
+// ============================================================================
+
 pub use execution::{
-    ExecutionEngine, ExecutionOptions, ExecutionMode,
-    PackExecutor, PackExecutorConfig, PackExecutorResult,
-    WorkspaceResult, StepResult, ExecutionStatus, StepStatus,
-    JobRegistry, JobStatus, JobSummary, JobResult, JobEvent,
+    // Executor
+    ExecutionMode, ExecutionOptions, PackExecutor, PackExecutorConfig, PackExecutorResult,
+    // Execution status and results
+    ExecutionStatus, StepResult, WorkspaceResult,
+    // Phase handlers (for advanced customization)
+    AcquisitionPhaseHandler, ProcessingPhaseHandler, ReportingPhaseHandler,
+    // Phase step handlers (for extending with custom steps)
+    AcquisitionStepHandler, ProcessingStepHandler, ReportingStepHandler,
+    // Phase contexts
+    AcquisitionContext, ProcessingContext, ReportingContext,
+    // Phase outputs
+    AcquisitionPhaseOutput, AcquisitionStepOutput, ProcessingPhaseOutput,
+    ProcessingStepOutput, ReportingPhaseOutput, ReportingStepOutput,
+    // Result storage (with Polars LazyFrame support)
+    LazyFrame, ResultContext, ResultHandle, ResultWriter, RowIterator,
+    // Job registry
+    JobEvent, JobRegistry, JobResult, JobStatus, JobSummary,
+    // Progress
     ProgressSender, ProgressUpdate,
+    // Tracing
+    ExecutionTrace, StepTrace,
 };
 
-// Re-export report types
-pub use report::{ReportGenerator, generate_report};
+// Step status types (acquisition phase uses a simpler enum)
+pub use execution::{StepExecutionStatus, StepStatus};
 
-// Re-export event types
-pub use events::{ContextEvent, EventLog, EventLogConfig, TimestampedEvent, SessionEndReason};
+// ============================================================================
+// Tracing and Logging
+// ============================================================================
 
-// Re-export schema types
-pub use schema::{
-    SchemaRegistry, SchemaType, TableInfo, ColumnDef, WorkspaceSchema,
+pub use crate::tracing::{
+    tui_channel, ExecutionPhase, FileLayer, LogLevel, TuiEvent, TuiLayer,
 };
+
+// ============================================================================
+// Schema Registry
+// ============================================================================
+
+pub use schema::{ColumnDef, SchemaRegistry, SchemaType, TableInfo, WorkspaceSchema};
 
 // Module declarations
 pub mod client;
 pub mod error;
-pub mod events;
 pub mod execution;
 pub mod pack;
-pub mod report;
-pub mod result;
 pub mod schema;
+pub mod tracing;
 pub mod variable;
 pub mod workspace;
 
 // KQL validation (via .NET FFI to Kusto.Language)
 pub mod validation;
+
+// ============================================================================
+// Prelude - Commonly used types for TUI and other consumers
+// ============================================================================
+
+/// A "batteries included" prelude for consumers of kql-panopticon-core.
+///
+/// Import with:
+/// ```rust,ignore
+/// use kql_panopticon_core::prelude::*;
+/// ```
+///
+/// This provides the most commonly needed types without polluting your namespace
+/// with everything exported at the crate root.
+pub mod prelude {
+    // Core types you'll use in every application
+    pub use crate::error::{Error, Result};
+    pub use crate::Client;
+    pub use crate::Workspace;
+
+    // Pack types for loading and configuring packs
+    pub use crate::Pack;
+
+    // Execution types for running packs
+    pub use crate::execution::{
+        ExecutionMode, ExecutionOptions, ExecutionStatus, PackExecutor, PackExecutorConfig,
+        PackExecutorResult, ProgressSender, ProgressUpdate, StepResult, WorkspaceResult,
+    };
+
+    // Result access for working with query results
+    pub use crate::execution::{ResultContext, ResultHandle};
+
+    // Tracing for TUI integration
+    pub use crate::tracing::{tui_channel, TuiEvent, TuiLayer};
+
+    // Job management
+    pub use crate::execution::{JobRegistry, JobStatus, JobSummary};
+}
