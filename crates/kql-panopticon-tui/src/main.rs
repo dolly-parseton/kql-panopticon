@@ -19,7 +19,6 @@ use ratatui::crossterm::terminal::{
 };
 use ratatui::Terminal;
 use std::io;
-use std::thread::sleep;
 use std::time::Duration;
 
 #[tokio::main]
@@ -54,32 +53,39 @@ async fn main() -> Result<()> {
 }
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut app::App) -> Result<bool> {
-    // Main app loop
     loop {
         terminal.draw(|f| ui::ui(f, app))?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind == event::KeyEventKind::Release {
-                // Skip events that are not KeyEventKind::Press
-                continue;
-            }
-            match app.current_screen {
-                _ => match key.code {
-                    KeyCode::Char('q') => {
-                        app.set_exit_screen();
-                    }
-                    _ => {}
-                },
+        // Non-blocking poll with 50ms timeout
+        // Allows loop to continue for async updates (progress channels, etc.)
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == event::KeyEventKind::Release {
+                    continue;
+                }
+                handle_key_event(app, key.code);
             }
         }
 
-        if let app::CurrentScreen::Exiting(start_time) = app.current_screen {
-            if start_time.elapsed() >= Duration::from_millis(100) {
-                break;
-            }
+        if app.should_exit() {
+            break;
         }
     }
     Ok(true)
+}
+
+fn handle_key_event(app: &mut app::App, key: KeyCode) {
+    match app.current_screen {
+        app::CurrentScreen::Interpreter => match key {
+            KeyCode::Char('q') => app.set_exit_screen(),
+            _ => {}
+        },
+        app::CurrentScreen::Settings => match key {
+            KeyCode::Char('q') => app.set_exit_screen(),
+            _ => {}
+        },
+        app::CurrentScreen::Exiting(_) => {}
+    }
 }
 
 fn set_dummydata(app: &mut app::App) {
