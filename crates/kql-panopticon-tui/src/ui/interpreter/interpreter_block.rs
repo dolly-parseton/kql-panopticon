@@ -1,12 +1,4 @@
-use std::rc::Rc;
-use std::str::Utf8Chunks;
-
-use crate::app::{App, CurrentScreen};
-use ratatui::layout::{Constraint, Direction, Layout};
-
-use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Padding, Paragraph, Widget};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use ratatui::Frame;
 
 pub fn render_interpreter(frame: &mut Frame, app: &crate::app::App, chunk: ratatui::layout::Rect) {
@@ -34,17 +26,30 @@ pub fn render_interpreter(frame: &mut Frame, app: &crate::app::App, chunk: ratat
             break; // No more room
         }
 
-        let block_area = ratatui::layout::Rect {
+        let command_area = ratatui::layout::Rect {
             x: inner_area.x,
             y: inner_area.y + y,
             width: inner_area.width,
             height: 1, // Single line for now
         };
 
-        let block_content = format!("> {}", block.command);
-        let block_para = Paragraph::new(block_content);
-        frame.render_widget(block_para, block_area);
+        // [status icon]➜ command
+        let command_content = format!(" {}➜ {}", block.status.icon(), block.command);
+        let command_para = Paragraph::new(command_content);
+        frame.render_widget(command_para, command_area);
 
-        y += LINES_PER_BLOCK as u16;
+        let result_lines = block.results.lines().count();
+
+        let results_area = ratatui::layout::Rect {
+            x: inner_area.x,
+            y: inner_area.y + y + 1,
+            width: inner_area.width - 2,
+            height: result_lines as u16, // Single line for now
+        };
+
+        let results_para = Paragraph::new(block.results.clone());
+        frame.render_widget(results_para, results_area);
+
+        y += LINES_PER_BLOCK as u16 + result_lines as u16 + 1; // +1 for spacing
     }
 }

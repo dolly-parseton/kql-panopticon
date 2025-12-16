@@ -84,8 +84,17 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut app::App) -> Result
 
 fn set_dummydata(app: &mut app::App) {
     for i in 0..50 {
-        app.blocks
-            .push(app::InterpreterBlock::new(i, format!("Block {}", i + 1)));
+        let mut block = app::InterpreterBlock::new(i, format!("Block {}", i + 1));
+
+        // random dummy results, some multiline
+        match i % 5 {
+            0 => block.results = "Result: OK".to_string(),
+            1 => block.results = "Result:\nLine 1\nLine 2".to_string(),
+            2 => block.results = "Result:\nLine 1\nLine 2\nLine 3".to_string(),
+            3 => block.results = "Result: ERROR".to_string(),
+            _ => block.results = format!("Results for block {}", i + 1),
+        }
+        app.blocks.push(block);
     }
     app.prompt.buffer = "dummy command".to_string();
 }
