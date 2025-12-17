@@ -1,12 +1,7 @@
-use std::rc::Rc;
-use std::str::Utf8Chunks;
-
-use crate::app::{App, CurrentScreen};
+use crate::app::CurrentScreen;
 use ratatui::layout::{Constraint, Direction, Layout};
-
-use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Padding, Paragraph, Widget};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use ratatui::Frame;
 
 pub fn render_title(frame: &mut Frame, app: &crate::app::App, chunk: ratatui::layout::Rect) {
@@ -16,17 +11,26 @@ pub fn render_title(frame: &mut Frame, app: &crate::app::App, chunk: ratatui::la
         .constraints([Constraint::Min(0)])
         .split(chunk)[0];
 
+    let view_name = match app.current_screen {
+        CurrentScreen::Interpreter => "Interpreter",
+        CurrentScreen::Settings => "Settings",
+        _ => "",
+    };
+
+    // Get styled title spans
+    let title_spans = app.theme.format_title_styled(view_name);
+    let title_line = Line::from(title_spans);
+
     frame.render_widget(
-        Paragraph::new(format!(
-            "kql-panopticon{}",
-            match app.current_screen {
-                CurrentScreen::Interpreter => " (Interpreter)",
-                CurrentScreen::Settings => " (Settings)",
-                _ => "",
-            },
-        ))
-        .block(Block::default().padding(Padding::horizontal(1)))
-        .block(Block::default().borders(Borders::ALL)),
+        Paragraph::new(title_line)
+            .block(
+                Block::default()
+                    .padding(Padding::horizontal(1))
+                    .borders(Borders::ALL)
+                    .border_type(app.theme.border_type())
+                    .border_style(app.theme.border_style())
+                    .style(app.theme.background_style()),
+            ),
         title_area,
     );
 }

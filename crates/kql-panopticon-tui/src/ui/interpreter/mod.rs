@@ -1,16 +1,14 @@
-use crate::app::{App, CurrentScreen};
-use ratatui::layout::{Constraint, Direction, Layout};
-
-use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Padding, Paragraph, Widget};
+use ratatui::widgets::{Block, Borders};
 use ratatui::Frame;
 
 mod interpreter_block;
 mod title;
 
 pub fn interpreter_ui(frame: &mut Frame, app: &crate::app::App) {
-    // UI rendering logic for interpreter screen goes here
+    // Render background
+    let bg_block = Block::default().style(app.theme.background_style());
+    frame.render_widget(bg_block, frame.area());
+
     let chunks = crate::layout::root(frame.area());
 
     // Title bar
@@ -19,8 +17,14 @@ pub fn interpreter_ui(frame: &mut Frame, app: &crate::app::App) {
     // Interpreter area - for rendering each block
     interpreter_block::render_interpreter(frame, app, chunks[1]);
 
-    // Prompt
-    let prompt_text = format!("> {}", app.prompt.buffer);
-    let prompt = Paragraph::new(prompt_text).block(Block::default().borders(Borders::ALL));
-    frame.render_widget(prompt, chunks[2]);
+    // Prompt - render TextArea with border
+    let prompt_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(app.theme.border_type())
+        .border_style(app.theme.prompt_border_style())
+        .style(app.theme.background_style())
+        .title(" Input ");
+    let prompt_area = prompt_block.inner(chunks[2]);
+    frame.render_widget(prompt_block, chunks[2]);
+    frame.render_widget(&app.prompt, prompt_area);
 }

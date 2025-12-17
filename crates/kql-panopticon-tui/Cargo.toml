@@ -19,6 +19,7 @@ futures.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 
 # Error handling
 anyhow.workspace = true
@@ -31,6 +32,7 @@ log.workspace = true
 uuid.workspace = true
 indexmap = { version = "2.7", features = ["serde"] }
 regex.workspace = true
+glob = "0.3"
 
 # CLI
 clap.workspace = true
@@ -45,6 +47,7 @@ env_logger.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 tui-textarea = "0.6"
+tui-tree-widget = "0.22"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
