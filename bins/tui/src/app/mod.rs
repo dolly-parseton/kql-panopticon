@@ -982,6 +982,19 @@ impl<'a> App<'a> {
         let page_size = self.ui_state.viewport_height.saturating_sub(2);
         self.scroll_down(page_size.max(1));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Clipboard
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// Get all interpreter blocks as formatted text for clipboard
+    pub fn blocks_as_text(&self) -> String {
+        self.blocks
+            .iter()
+            .map(|block| format!("> {}\n{}", block.command, block.results))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

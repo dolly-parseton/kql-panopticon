@@ -30,6 +30,7 @@ tui = [
     "dep:tui-tree-widget",
     "dep:walkdir",
     "dep:log",
+    "dep:arboard",
 ]
 
 [dependencies]
@@ -97,6 +98,7 @@ tui-textarea = { version = "0.6", optional = true, default-features = false, fea
 tui-tree-widget = { version = "0.22", optional = true }
 walkdir = { version = "2", optional = true }
 log = { version = "0.4", optional = true }
+arboard = { version = "3", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros"] }
