@@ -1,0 +1,83 @@
+# Security Baseline Pack
+#
+# A simple security baseline pack that demonstrates pack capabilities.
+# Runs several security-focused KQL queries across workspaces.
+#
+# Usage:
+#   pack-runner examples/security-baseline.yaml
+#   pack-runner examples/security-baseline.yaml --workspace prod-ws
+#   pack-runner examples/security-baseline.yaml --output ./results
+
+name: Security Baseline
+description: |
+  Basic security checks for Azure environments.
+  Collects failed sign-ins, security alerts, and risky users.
+version: "1.0"
+
+acquisition:
+  # No required inputs - this pack runs standalone
+  inputs: []
+
+  # Execution steps
+  steps:
+    # Step 1: Collect failed sign-in attempts
+    - name: failed_signins
+      type: kql
+      query: |
+        SigninLogs
+        | where TimeGenerated > ago(7d)
+        | where ResultType != "0"
+        | summarize
+            FailedAttempts = count(),
+            DistinctIPs = dcount(IPAddress),
+            LastAttempt = max(TimeGenerated)
+          by UserPrincipalName, ResultType, ResultDescription
+        | order by FailedAttempts desc
+        | take 100
+      timespan: P7D
+
+    # Step 2: Collect recent security alerts
+    - name: security_alerts
+      type: kql
+      query: |
+        SecurityAlert
+        | where TimeGenerated > ago(7d)
+        | summarize
+            AlertCount = count(),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated)
+          by AlertName, AlertSeverity, ProviderName
+        | order by AlertCount desc
+        | take 50
+      timespan: P7D
+
+    # Step 3: Collect AAD risky users (if available)
+    - name: risky_users
+      type: kql
+      query: |
+        AADUserRiskEvents
+        | where TimeGenerated > ago(30d)
+        | summarize
+            RiskEventCount = count(),
+            RiskLevels = make_set(RiskLevel),
+            LastRiskEvent = max(TimeGenerated)
+          by UserPrincipalName, RiskEventType
+        | order by RiskEventCount desc
+        | take 50
+      timespan: P30D
+      on_error: continue  # Table may not exist in all workspaces
+
+    # Step 4: Collect admin activities
+    - name: admin_activities
+      type: kql
+      query: |
+        AuditLogs
+        | where TimeGenerated > ago(7d)
+        | where OperationName has_any ("Add member to role", "Remove member from role", "Add owner", "Remove owner")
+        | extend Actor = tostring(InitiatedBy.user.userPrincipalName)
+        | extend Target = tostring(TargetResources[0].displayName)
+        | project TimeGenerated, OperationName, Actor, Target, Result
+        | order by TimeGenerated desc
+        | take 100
+      timespan: P7D
+      on_error: continue

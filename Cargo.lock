@@ -1790,15 +1790,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "kql-language-ffi"
-version = "0.3.0"
+name = "kql-language-tools"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a37f52bcec8f5311cd1909ea3e311bf4f8ab24f3731e8639e7cf02eb7549ed6"
 dependencies = [
  "libloading",
  "log",
  "once_cell",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1814,7 +1816,7 @@ dependencies = [
  "dirs",
  "futures",
  "jsonpath_lib",
- "kql-language-ffi",
+ "kql-language-tools",
  "polars",
  "regex",
  "reqwest 0.11.27",
@@ -1856,7 +1858,6 @@ dependencies = [
  "dirs",
  "env_logger",
  "futures",
- "glob",
  "indexmap",
  "kql-panopticon-core",
  "log",
@@ -1868,9 +1869,12 @@ dependencies = [
  "shlex",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "tui-textarea",
  "tui-tree-widget",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]

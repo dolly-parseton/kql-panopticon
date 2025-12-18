@@ -1,0 +1,131 @@
+# Acquisition configuration
+# Data collection using datatable queries for testing
+
+inputs:
+  - name: target_user
+    type: string
+    label: Target User
+    description: User to investigate (simulated)
+    required: false
+    default: "alice@contoso.com"
+    example: "alice@contoso.com"
+
+  - name: days
+    type: string
+    label: Lookback Days
+    description: Number of days (used in simulation)
+    required: false
+    default: "7"
+
+steps:
+  # Step 1: Simulated sign-in activity
+  - name: signins
+    type: kql
+    query: |
+      // Simulated sign-in data using datatable
+      datatable(
+        UserPrincipalName: string,
+        IPAddress: string,
+        AppDisplayName: string,
+        ResultType: string,
+        Location: string,
+        SigninCount: long,
+        FailedCount: long
+      ) [
+        "alice@contoso.com", "10.0.0.1", "Office 365", "0", "US", 5, 0,
+        "alice@contoso.com", "203.0.113.50", "Azure Portal", "50126", "RU", 3, 2,
+        "bob@contoso.com", "10.0.0.1", "Office 365", "0", "UK", 2, 0,
+        "charlie@contoso.com", "192.168.1.100", "Teams", "0", "US", 4, 0
+      ]
+      | summarize
+          TotalSignins = sum(SigninCount),
+          TotalFailed = sum(FailedCount),
+          UniqueIPs = dcount(IPAddress),
+          Apps = make_set(AppDisplayName),
+          Locations = make_set(Location)
+        by UserPrincipalName
+      | extend FailureRate = round(100.0 * TotalFailed / TotalSignins, 1)
+      | order by TotalFailed desc
+    timespan: P7D
+
+  # Step 2: Simulated IP reputation data
+  - name: ip_activity
+    type: kql
+    query: |
+      // Simulated IP activity data
+      datatable(
+        IPAddress: string,
+        ThreatCategory: string,
+        Confidence: int,
+        TotalConnections: int,
+        UniqueUsers: int
+      ) [
+        "10.0.0.1", "none", 0, 150, 5,
+        "192.168.1.100", "none", 0, 80, 3,
+        "203.0.113.50", "malware", 85, 25, 2,
+        "198.51.100.1", "botnet", 92, 10, 1
+      ]
+      | extend IsSuspicious = Confidence > 50
+      | order by Confidence desc
+    timespan: P7D
+
+  # Step 3: Combine user and IP data (depends on previous steps)
+  - name: correlation
+    type: kql
+    depends_on: [signins, ip_activity]
+    when: "signins is not empty"
+    query: |
+      // Correlation of user to IP mappings
+      let user_ips = datatable(
+        UserPrincipalName: string,
+        IPAddress: string
+      ) [
+        "alice@contoso.com", "10.0.0.1",
+        "alice@contoso.com", "203.0.113.50",
+        "bob@contoso.com", "10.0.0.1",
+        "charlie@contoso.com", "192.168.1.100"
+      ];
+      let ip_threats = datatable(
+        IPAddress: string,
+        Confidence: int
+      ) [
+        "10.0.0.1", 0,
+        "192.168.1.100", 0,
+        "203.0.113.50", 85
+      ];
+      user_ips
+      | join kind=leftouter ip_threats on IPAddress
+      | summarize
+          MaxThreatConfidence = max(Confidence),
+          IPCount = dcount(IPAddress),
+          SuspiciousIPCount = dcountif(IPAddress, Confidence > 50)
+        by UserPrincipalName
+      | extend RiskScore = MaxThreatConfidence
+      | order by RiskScore desc
+    timespan: P7D
+
+  # Step 4: Security alerts (simulated)
+  - name: alerts
+    type: kql
+    query: |
+      // Simulated security alerts
+      datatable(
+        AlertName: string,
+        Severity: string,
+        UserPrincipalName: string,
+        IPAddress: string,
+        Description: string
+      ) [
+        "Impossible Travel", "High", "alice@contoso.com", "203.0.113.50", "Login from unusual location",
+        "Multiple Failed Logins", "Medium", "alice@contoso.com", "203.0.113.50", "5 failed attempts",
+        "New Device Login", "Low", "bob@contoso.com", "10.0.0.1", "First login from this device"
+      ]
+      | summarize
+          AlertCount = count(),
+          HighSeverity = countif(Severity == "High"),
+          MediumSeverity = countif(Severity == "Medium"),
+          LowSeverity = countif(Severity == "Low")
+        by UserPrincipalName, AlertName
+      | order by HighSeverity desc, MediumSeverity desc
+    timespan: P7D
+    on_error: continue

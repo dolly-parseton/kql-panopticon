@@ -52,7 +52,7 @@ jsonpath_lib.workspace = true
 polars.workspace = true
 
 # KQL validation via FFI (Kusto.Language)
-kql-language-ffi = { path = "../kql-language-ffi" }
+kql-language-tools.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

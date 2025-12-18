@@ -258,12 +258,12 @@ impl SchemaRegistry {
     // ========== Validation Integration ==========
 
     /// Convert to FFI validation schema (for a specific workspace)
-    pub fn to_validation_schema(&self, workspace_id: Option<&str>) -> kql_language_ffi::Schema {
-        let mut schema = kql_language_ffi::Schema::new();
+    pub fn to_validation_schema(&self, workspace_id: Option<&str>) -> kql_language_tools::Schema {
+        let mut schema = kql_language_tools::Schema::new();
 
         // Add canonical tables
         for table_info in self.data.tables.values() {
-            let mut table = kql_language_ffi::Table::new(&table_info.name);
+            let mut table = kql_language_tools::Table::new(&table_info.name);
 
             // Add base columns
             for col in &table_info.columns {
@@ -290,7 +290,7 @@ impl SchemaRegistry {
         if let Some(ws_id) = workspace_id {
             if let Some(ws) = self.data.workspaces.get(ws_id) {
                 for custom_table in ws.custom_tables.values() {
-                    let mut table = kql_language_ffi::Table::new(&custom_table.name);
+                    let mut table = kql_language_tools::Table::new(&custom_table.name);
                     for col in &custom_table.columns {
                         table = table.with_column(&col.name, &col.data_type);
                     }

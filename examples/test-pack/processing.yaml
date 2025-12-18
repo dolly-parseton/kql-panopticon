@@ -1,0 +1,57 @@
+# Processing configuration
+# Scoring based on acquisition step results
+
+steps:
+  - name: risk_assessment
+    type: scoring
+    indicators:
+      - name: has_failed_logins
+        condition: "signins.any(TotalFailed > 0)"
+        weight: 15
+        description: User has failed login attempts
+
+      - name: high_failure_rate
+        condition: "signins.any(FailureRate > 20)"
+        weight: 25
+        description: User has high login failure rate (>20%)
+
+      - name: suspicious_ip_connection
+        condition: "ip_activity.any(IsSuspicious == true)"
+        weight: 30
+        description: Connection from suspicious IP detected
+
+      - name: high_threat_confidence
+        condition: "ip_activity.any(Confidence > 75)"
+        weight: 20
+        description: IP has high threat confidence score
+
+      - name: high_severity_alert
+        condition: "alerts.any(HighSeverity > 0)"
+        weight: 35
+        description: High severity security alert triggered
+
+      - name: multiple_alerts
+        condition: "alerts.any(AlertCount > 1)"
+        weight: 10
+        description: Multiple alerts for same user
+
+    thresholds:
+      - level: CRITICAL
+        min_score: 80
+        summary: "Critical risk: Multiple severe indicators detected (score: {{score}})"
+        recommendation: Immediate investigation required. Consider disabling account.
+
+      - level: HIGH
+        min_score: 50
+        summary: "High risk: Significant security concerns detected (score: {{score}})"
+        recommendation: Investigate user activity and review alerts promptly.
+
+      - level: MEDIUM
+        min_score: 25
+        summary: "Medium risk: Some suspicious activity detected (score: {{score}})"
+        recommendation: Monitor user and review recent activity.
+
+      - level: LOW
+        min_score: 0
+        summary: "Low risk: Normal activity patterns (score: {{score}})"
+        recommendation: Continue standard monitoring.

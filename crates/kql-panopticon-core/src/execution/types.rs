@@ -178,6 +178,9 @@ pub struct StepResult {
     /// Step name
     pub name: String,
 
+    /// Execution phase this step belongs to
+    pub phase: ExecutionPhase,
+
     /// Status
     pub status: StepStatus,
 
@@ -224,6 +227,17 @@ pub enum StepStatus {
     Success,
     Failed,
     Skipped,
+}
+
+/// Execution phase for a step
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionPhase {
+    /// Data acquisition from Azure/HTTP/files
+    Acquisition,
+    /// Data processing (scoring, transformations)
+    Processing,
+    /// Report generation
+    Reporting,
 }
 
 #[cfg(test)]

@@ -20,7 +20,8 @@ use super::reporting::ReportingPhaseHandler;
 use super::result::ResultContext;
 use super::trace::{ExecutionTrace, TraceStatus};
 use super::types::{
-    ExecutionStatus, PackExecutorConfig, PackExecutorResult, StepResult, WorkspaceResult,
+    ExecutionPhase, ExecutionStatus, PackExecutorConfig, PackExecutorResult, StepResult,
+    WorkspaceResult,
 };
 
 use chrono::Local;
@@ -383,12 +384,12 @@ impl PackExecutor {
         };
 
         // Phase 3: Reporting (if configured)
-        if let Some(ref reporting) = pack.reporting {
+        let rep_output = if let Some(ref reporting) = pack.reporting {
             if !reporting.is_empty() {
                 debug!(phase = "reporting", "Starting reporting phase");
 
                 // Pass ResultContext refs for lazy materialization
-                let _rep_output = self
+                match self
                     .reporting
                     .execute(
                         reporting,
@@ -401,11 +402,21 @@ impl PackExecutor {
                         config.pack_path.as_deref(),
                         progress,
                     )
-                    .await;
-
-                // Reporting failures don't fail the workspace (logged but continued)
+                    .await
+                {
+                    Ok(output) => Some(output),
+                    Err(e) => {
+                        // Reporting failures don't fail the workspace (logged but continued)
+                        tracing::warn!(error = %e, "Reporting phase failed");
+                        None
+                    }
+                }
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
         // Build final step results
         let mut step_results = convert_step_statuses(&acq_output.step_statuses);
@@ -422,6 +433,7 @@ impl PackExecutor {
                     name.clone(),
                     StepResult {
                         name: name.clone(),
+                        phase: ExecutionPhase::Processing,
                         status: match status.status {
                             super::processing::ProcessingStatus::Success => {
                                 super::types::StepStatus::Success
@@ -430,6 +442,34 @@ impl PackExecutor {
                                 super::types::StepStatus::Failed
                             }
                             super::processing::ProcessingStatus::Skipped => {
+                                super::types::StepStatus::Skipped
+                            }
+                        },
+                        row_count: None,
+                        duration_ms: status.duration_ms,
+                        output_path: None,
+                        error: status.error.clone(),
+                    },
+                );
+            }
+        }
+
+        // Add reporting step results
+        if let Some(rep) = rep_output {
+            for (name, status) in &rep.report_statuses {
+                step_results.insert(
+                    name.clone(),
+                    StepResult {
+                        name: name.clone(),
+                        phase: ExecutionPhase::Reporting,
+                        status: match status.status {
+                            super::reporting::ReportingStatus::Success => {
+                                super::types::StepStatus::Success
+                            }
+                            super::reporting::ReportingStatus::Failed => {
+                                super::types::StepStatus::Failed
+                            }
+                            super::reporting::ReportingStatus::Skipped => {
                                 super::types::StepStatus::Skipped
                             }
                         },
@@ -466,6 +506,7 @@ fn convert_step_statuses(
                 name.clone(),
                 StepResult {
                     name: name.clone(),
+                    phase: ExecutionPhase::Acquisition,
                     status: match status.status {
                         super::acquisition::AcquisitionStepStatus::Success => super::types::StepStatus::Success,
                         super::acquisition::AcquisitionStepStatus::Failed => super::types::StepStatus::Failed,

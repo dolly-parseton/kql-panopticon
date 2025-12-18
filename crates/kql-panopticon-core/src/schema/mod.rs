@@ -40,4 +40,4 @@ pub use types::{
 };
 
 // Re-export FFI types that we use for validation integration
-pub use kql_language_ffi::{Schema as ValidationSchema, Table as ValidationTable, Column as ValidationColumn};
+pub use kql_language_tools::{Schema as ValidationSchema, Table as ValidationTable, Column as ValidationColumn};

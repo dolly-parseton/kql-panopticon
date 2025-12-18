@@ -46,20 +46,20 @@
 use crate::error::{Error, Result};
 
 // Re-export types from kql-language-ffi for convenience
-pub use kql_language_ffi::{Column, Diagnostic, DiagnosticSeverity, Function, Schema, Table, ValidationResult};
+pub use kql_language_tools::{Column, Diagnostic, DiagnosticSeverity, Function, Schema, Table, ValidationResult};
 
 // Re-export classification types for syntax highlighting
-pub use kql_language_ffi::{ClassificationKind, ClassifiedSpan, ClassificationResult};
+pub use kql_language_tools::{ClassificationKind, ClassifiedSpan, ClassificationResult};
 
 // Re-export completion types for code completion
-pub use kql_language_ffi::{CompletionItem, CompletionKind, CompletionResult};
+pub use kql_language_tools::{CompletionItem, CompletionKind, CompletionResult};
 
 /// KQL query validator
 ///
 /// Wraps the FFI bindings to Microsoft's Kusto.Language library.
 /// The validator is created once and can be reused for multiple queries.
 pub struct KqlValidator {
-    inner: kql_language_ffi::KqlValidator,
+    inner: kql_language_tools::KqlValidator,
 }
 
 impl KqlValidator {
@@ -68,7 +68,7 @@ impl KqlValidator {
     /// This loads the native library and initializes the Kusto parser.
     /// The library is loaded once per process and cached.
     pub fn new() -> Result<Self> {
-        let inner = kql_language_ffi::KqlValidator::new().map_err(|e| Error::Validation {
+        let inner = kql_language_tools::KqlValidator::new().map_err(|e| Error::Validation {
             message: format!("Failed to initialize KQL validator: {}", e),
             line: None,
             column: None,

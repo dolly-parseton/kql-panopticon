@@ -70,6 +70,6 @@ pub use progress::{ProgressSender, ProgressUpdate};
 pub use registry::{JobEvent, JobRegistry, JobResult, JobStatus, JobSummary};
 pub use trace::{ExecutionTrace, StepTrace};
 pub use types::{
-    ExecutionStatus, PackExecutorConfig, PackExecutorResult, StepResult, StepStatus,
-    WorkspaceResult,
+    ExecutionPhase, ExecutionStatus, PackExecutorConfig, PackExecutorResult, StepResult,
+    StepStatus, WorkspaceResult,
 };
