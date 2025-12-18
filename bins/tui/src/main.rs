@@ -20,6 +20,7 @@ use ratatui::backend::Backend;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -105,14 +106,26 @@ fn run_app<B: Backend>(
 
         terminal.draw(|f| ui::ui(f, app))?;
 
-        // Non-blocking poll with 50ms timeout
+        // Non-blocking poll with 16ms timeout (~60fps responsiveness)
         // Allows loop to continue for async updates (progress channels, etc.)
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == event::KeyEventKind::Release {
-                    continue;
+        if event::poll(Duration::from_millis(16))? {
+            // Drain all available events to prevent input lag
+            loop {
+                match event::read()? {
+                    Event::Key(key) => {
+                        if key.kind != event::KeyEventKind::Release {
+                            handle_key_event(app, key);
+                        }
+                    }
+                    Event::Mouse(mouse) => {
+                        handle_mouse_event(app, mouse);
+                    }
+                    _ => {}
                 }
-                handle_key_event(app, key);
+                // Check if more events are immediately available (non-blocking)
+                if !event::poll(Duration::ZERO)? {
+                    break;
+                }
             }
         }
 
@@ -287,6 +300,75 @@ fn handle_key_event(app: &mut app::App, key: KeyEvent) {
     }
 }
 
+/// Number of lines to scroll per mouse wheel tick
+const SCROLL_LINES_PER_TICK: usize = 1;
+
+fn handle_mouse_event(app: &mut app::App, mouse: MouseEvent) {
+    let scroll_up = matches!(mouse.kind, MouseEventKind::ScrollUp);
+    let scroll_down = matches!(mouse.kind, MouseEventKind::ScrollDown);
+
+    if !scroll_up && !scroll_down {
+        return;
+    }
+
+    // Debug: log every scroll event received
+    log::debug!("Mouse scroll: {:?} at ({}, {})", mouse.kind, mouse.column, mouse.row);
+
+    // Modal takes priority (mirrors handle_key_event pattern)
+    match &mut app.active_modal {
+        app::ActiveModal::WorkspaceSelector(state) => {
+            for _ in 0..SCROLL_LINES_PER_TICK {
+                if scroll_up {
+                    state.move_up();
+                } else {
+                    state.move_down();
+                }
+            }
+        }
+        app::ActiveModal::ThemeSelector(state) => {
+            for _ in 0..SCROLL_LINES_PER_TICK {
+                if scroll_up {
+                    state.move_up();
+                } else {
+                    state.move_down();
+                }
+            }
+            app.preview_selected_theme();
+        }
+        app::ActiveModal::PackLoader(state) => {
+            for _ in 0..SCROLL_LINES_PER_TICK {
+                if scroll_up {
+                    state.move_up();
+                } else {
+                    state.move_down();
+                }
+            }
+        }
+        app::ActiveModal::Logs(state) => {
+            for _ in 0..SCROLL_LINES_PER_TICK {
+                if scroll_up {
+                    state.move_up();
+                } else {
+                    state.move_down();
+                }
+            }
+        }
+        app::ActiveModal::SettingsConfirmation => {
+            // No scrolling for simple confirmation dialog
+        }
+        app::ActiveModal::None => {
+            // Main interpreter screen
+            if matches!(app.current_screen, app::CurrentScreen::Interpreter) {
+                if scroll_up {
+                    app.scroll_up(SCROLL_LINES_PER_TICK);
+                } else {
+                    app.scroll_down(SCROLL_LINES_PER_TICK);
+                }
+            }
+        }
+    }
+}
+
 fn handle_command(app: &mut app::App, command: &str) {
     let command = command.trim();
 
@@ -317,6 +399,9 @@ fn handle_command(app: &mut app::App, command: &str) {
         }
         ":logs" => {
             app.open_logs_modal();
+        }
+        ":copy" => {
+            handle_copy_command(app, command);
         }
         ":run" => {
             handle_run_command(app, command);
@@ -535,6 +620,44 @@ fn handle_theme_command(app: &mut app::App, args: &[&str]) {
 
         app.blocks.push(block);
     }
+}
+
+fn handle_copy_command(app: &mut app::App, command: &str) {
+    let block_id = app.blocks.len();
+    let mut block = app::InterpreterBlock::new(block_id, command.to_string());
+
+    if app.blocks.is_empty() {
+        block.results = "Nothing to copy".to_string();
+        block.status = app::BlockStatus::Failed;
+        app.blocks.push(block);
+        return;
+    }
+
+    let content = app.blocks_as_text();
+    let char_count = content.len();
+    let block_count = app.blocks.len();
+
+    match arboard::Clipboard::new() {
+        Ok(mut clipboard) => match clipboard.set_text(&content) {
+            Ok(()) => {
+                block.results = format!(
+                    "Copied {} block(s) to clipboard ({} chars)",
+                    block_count, char_count
+                );
+                block.status = app::BlockStatus::Completed;
+            }
+            Err(e) => {
+                block.results = format!("Failed to copy to clipboard: {}", e);
+                block.status = app::BlockStatus::Failed;
+            }
+        },
+        Err(e) => {
+            block.results = format!("Failed to access clipboard: {}", e);
+            block.status = app::BlockStatus::Failed;
+        }
+    }
+
+    app.blocks.push(block);
 }
 
 /// Pre-flight validation for pack execution
