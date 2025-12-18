@@ -73,7 +73,7 @@ steps:
   - name: correlation
     type: kql
     depends_on: [signins, ip_activity]
-    when: "signins is not empty"
+    when: "{{signins | is_not_empty}}"
     query: |
       // Correlation of user to IP mappings
       let user_ips = datatable(

@@ -4,8 +4,8 @@
 # Investigates IP addresses by correlating sign-in activity.
 #
 # Usage:
-#   pack-runner examples/ip-investigation.yaml --input ip_list=8.8.8.8
-#   pack-runner examples/ip-investigation.yaml --input ip_list=8.8.8.8,1.1.1.1 --input days=14
+#   panopticon-cli examples/ip-investigation.yaml --input ip_list=8.8.8.8
+#   panopticon-cli examples/ip-investigation.yaml --input ip_list=8.8.8.8,1.1.1.1 --input days=14
 
 name: IP Investigation
 description: |
@@ -55,9 +55,9 @@ acquisition:
     - name: affected_users
       type: kql
       depends_on: [signin_activity]
-      when: "signin_activity is not empty"
+      when: "{{signin_activity | is_not_empty}}"
       query: |
-        let target_ips = dynamic([{{signin_activity.*.IPAddress}}]);
+        let target_ips = dynamic([{{signin_activity.IPAddress | array}}]);
         SigninLogs
         | where TimeGenerated > ago({{inputs.days}}d)
         | where IPAddress in (target_ips)
@@ -75,9 +75,9 @@ acquisition:
     - name: signin_timeline
       type: kql
       depends_on: [affected_users]
-      when: "affected_users is not empty"
+      when: "{{affected_users | is_not_empty}}"
       query: |
-        let users = dynamic([{{affected_users.*.UserPrincipalName}}]);
+        let users = dynamic([{{affected_users.UserPrincipalName | array}}]);
         SigninLogs
         | where TimeGenerated > ago({{inputs.days}}d)
         | where UserPrincipalName in (users)

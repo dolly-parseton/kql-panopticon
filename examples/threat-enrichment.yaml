@@ -1,11 +1,11 @@
 # Threat Enrichment Pack
 #
-# Demonstrates foreach iteration with HTTP enrichment.
+# Demonstrates HTTP iteration with threat intelligence enrichment.
 # Queries for suspicious IPs, then enriches each with threat intelligence.
 #
 # Usage:
-#   pack-runner examples/threat-enrichment.yaml
-#   pack-runner examples/threat-enrichment.yaml --input min_failed_logins=10
+#   panopticon-cli examples/threat-enrichment.yaml
+#   panopticon-cli examples/threat-enrichment.yaml --input min_failed_logins=10
 
 name: Threat Enrichment
 description: |
@@ -48,16 +48,16 @@ acquisition:
       timespan: P7D
 
     # Step 2: Enrich each suspicious IP with threat intel
-    # This demonstrates foreach iteration over step results
+    # Uses for_each transform to iterate over step results
     - name: ip_enrichment
       type: http
       depends_on: [suspicious_ips]
-      foreach: "suspicious_ips as ip"
+      when: "{{suspicious_ips | is_not_empty}}"
       request:
         method: GET
         url: "https://api.abuseipdb.com/api/v2/check"
         params:
-          ipAddress: "{{ip.IPAddress}}"
+          ipAddress: "{{suspicious_ips.IPAddress | for_each}}"
           maxAgeInDays: "90"
         headers:
           Key: "{{secrets.threat_api_key}}"
@@ -75,42 +75,25 @@ acquisition:
       rate_limit:
         requests: 10
         per: second
-      aggregate: append
       on_error: continue
-      on_empty: skip
 
-    # Step 3: Combine findings
-    - name: enriched_results
+    # Step 3: Correlate with original sign-in data
+    - name: correlate
       type: kql
       depends_on: [suspicious_ips, ip_enrichment]
-      when: "ip_enrichment is not empty"
+      when: "{{ip_enrichment | is_not_empty}}"
       query: |
-        // Join original findings with enrichment data
-        let original = datatable(
-          IPAddress: string,
-          FailedAttempts: int,
-          TargetedUsers: int
-        ) [
-          {{suspicious_ips.*.IPAddress}}, {{suspicious_ips.*.FailedAttempts}}, {{suspicious_ips.*.TargetedUsers}}
-        ];
-        let enriched = datatable(
-          ip_address: string,
-          abuse_confidence: int,
-          total_reports: int,
-          isp: string
-        ) [
-          {{ip_enrichment.*.ip_address}}, {{ip_enrichment.*.abuse_confidence}}, {{ip_enrichment.*.total_reports}}, {{ip_enrichment.*.isp}}
-        ];
-        original
-        | join kind=leftouter enriched on $left.IPAddress == $right.ip_address
-        | project
-            IPAddress,
-            FailedAttempts,
-            TargetedUsers,
-            AbuseScore = coalesce(abuse_confidence, 0),
-            TotalReports = coalesce(total_reports, 0),
-            ISP = coalesce(isp, "Unknown")
-        | order by AbuseScore desc, FailedAttempts desc
+        // Get high-risk IPs from enrichment
+        let high_risk = dynamic([{{ip_enrichment | filter(abuse_confidence > 50).ip_address | array}}]);
+        SigninLogs
+        | where TimeGenerated > ago(7d)
+        | where IPAddress in (high_risk)
+        | summarize
+            SigninCount = count(),
+            FailedCount = countif(ResultType != "0"),
+            Users = make_set(UserPrincipalName, 10)
+          by IPAddress
+        | order by FailedCount desc
       timespan: P7D
       on_error: continue
 
@@ -121,22 +104,22 @@ processing:
       type: scoring
       indicators:
         - name: high_abuse_score
-          condition: "enriched_results.any(AbuseScore > 75)"
+          condition: "{{ip_enrichment | any(abuse_confidence > 75)}}"
           weight: 30
           description: IP has high abuse confidence score
 
         - name: many_reports
-          condition: "enriched_results.any(total_reports > 100)"
+          condition: "{{ip_enrichment | any(total_reports > 100)}}"
           weight: 20
           description: IP has many abuse reports
 
         - name: high_failed_logins
-          condition: "suspicious_ips.any(FailedAttempts > 50)"
+          condition: "{{suspicious_ips | any(FailedAttempts > 50)}}"
           weight: 25
           description: High volume of failed login attempts
 
         - name: multiple_targets
-          condition: "suspicious_ips.any(TargetedUsers > 10)"
+          condition: "{{suspicious_ips | any(TargetedUsers > 10)}}"
           weight: 15
           description: Multiple users targeted by same IP
 
@@ -186,9 +169,9 @@ reporting:
 
         ## High-Risk IPs
 
-        {% for ip in enriched_results %}
-        {% if ip.AbuseScore > 50 %}
-        - **{{ ip.IPAddress }}**: Abuse Score {{ ip.AbuseScore }}, {{ ip.FailedAttempts }} failed logins ({{ ip.ISP }})
+        {% for ip in ip_enrichment %}
+        {% if ip.abuse_confidence > 50 %}
+        - **{{ ip.ip_address }}**: Abuse Score {{ ip.abuse_confidence }}, {{ ip.total_reports }} reports ({{ ip.isp }})
         {% endif %}
         {% endfor %}
 

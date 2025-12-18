@@ -91,7 +91,7 @@ steps:
     type: http
     depends_on:
       - suspicious_ips
-    when: "length(suspicious_ips) > 0"
+    when: "{{suspicious_ips | length | gt(0)}}"
 
     request:
       method: POST

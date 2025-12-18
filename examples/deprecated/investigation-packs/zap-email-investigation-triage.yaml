@@ -243,7 +243,7 @@ steps:
   # Analyze sender domain history - high volume + low block = likely marketing
   - name: sender_reputation
     depends_on: [investigation_context, root_domains]
-    when: "root_domains.length > 0"
+    when: "{{root_domains | length | gt(0)}}"
     options:
       dedupe: true
     query: |
@@ -305,7 +305,7 @@ steps:
   # Analyze URLs in the email - Microsoft/tracking URLs = likely FP
   - name: url_analysis
     depends_on: [investigation_context, email_details]
-    when: "email_details.any(UrlCount > 0)"
+    when: "{{email_details | any(UrlCount > 0)}}"
     options:
       dedupe: true
     query: |
@@ -362,7 +362,7 @@ steps:
   # Check attachment threat verdicts - threats = high risk
   - name: attachment_analysis
     depends_on: [investigation_context, email_details]
-    when: "email_details.any(AttachmentCount > 0)"
+    when: "{{email_details | any(AttachmentCount > 0)}}"
     options:
       dedupe: true
     query: |
@@ -473,7 +473,7 @@ steps:
   # Find similar emails from the same sender - mass campaign = spam/marketing
   - name: campaign_scope
     depends_on: [investigation_context, root_domains]
-    when: "root_domains.length > 0"
+    when: "{{root_domains | length | gt(0)}}"
     options:
       dedupe: true
     query: |

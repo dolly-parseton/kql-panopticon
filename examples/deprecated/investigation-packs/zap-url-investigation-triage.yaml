@@ -174,7 +174,7 @@ steps:
     foreach: "url_domains as domain"
     on_empty: skip
     # Only lookup non-Microsoft, non-known-safe domains
-    when: "url_domains.any(IsMicrosoftDomain == false) and url_domains.any(IsKnownSafe == false)"
+    when: "{{url_domains | any(IsMicrosoftDomain == false)}} and {{url_domains | any(IsKnownSafe == false)}}"
 
     request:
       method: POST
