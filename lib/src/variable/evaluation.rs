@@ -15,8 +15,10 @@ use crate::error::{Error, Result};
 use crate::execution::result::{ResultContext, ResultHandle};
 use crate::pack::{InputType, QuoteStyle};
 use crate::variable::pipeline::Pipeline;
+use crate::variable::predicate::{ComparisonOp, Predicate, PredicateValue};
 use crate::variable::source::Source;
 use crate::variable::transform::Transform;
+use polars::prelude::*;
 use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -248,18 +250,47 @@ impl<'a> EvaluationContext<'a> {
 }
 
 /// Internal intermediate value during pipeline evaluation.
-#[derive(Debug)]
+///
+/// Uses Polars LazyFrame for step data to enable deferred execution
+/// and query optimization. Only collects results at terminal transforms.
 enum IntermediateValue {
-    /// All rows from a step.
-    StepRows(Vec<JsonValue>),
-    /// Column values.
+    /// LazyFrame representing step rows (deferred execution).
+    /// Used for step-level transforms: is_empty, length, any, all, filter.
+    LazyRows(LazyFrame),
+
+    /// LazyFrame with single column selected (deferred execution).
+    /// Used for column transforms: first, at, array, unique, str_join.
+    LazyColumn { frame: LazyFrame, column: String },
+
+    /// Collected column values (post-terminal transform).
+    /// From `array`, `unique | array`, or `for_each`.
     ColumnValues(Vec<String>),
-    /// Single scalar value.
+
+    /// Single scalar value (already materialized).
+    /// From inputs/secrets or terminal transforms like `first`, `str_join`.
     Scalar(String),
+
     /// Single integer value (from length).
     Integer(usize),
-    /// Boolean value.
+
+    /// Boolean value (from is_empty, any, all, comparisons).
     Boolean(bool),
+}
+
+// LazyFrame doesn't implement Debug, so we implement it manually
+impl std::fmt::Debug for IntermediateValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IntermediateValue::LazyRows(_) => write!(f, "LazyRows(<LazyFrame>)"),
+            IntermediateValue::LazyColumn { column, .. } => {
+                write!(f, "LazyColumn {{ column: {:?} }}", column)
+            }
+            IntermediateValue::ColumnValues(v) => f.debug_tuple("ColumnValues").field(v).finish(),
+            IntermediateValue::Scalar(s) => f.debug_tuple("Scalar").field(s).finish(),
+            IntermediateValue::Integer(n) => f.debug_tuple("Integer").field(n).finish(),
+            IntermediateValue::Boolean(b) => f.debug_tuple("Boolean").field(b).finish(),
+        }
+    }
 }
 
 /// Evaluate a pipeline against a context.
@@ -299,15 +330,28 @@ fn resolve_source(pipeline: &Pipeline, ctx: &EvaluationContext<'_>) -> Result<In
         }
 
         Source::Step { name } => {
-            // Load all rows for step-level operations
-            let rows = ctx.step_results().materialize(name)?;
-            Ok(IntermediateValue::StepRows(rows))
+            // Return LazyFrame for deferred execution
+            match ctx.step_results().lazy_frame(name)? {
+                Some(lf) => Ok(IntermediateValue::LazyRows(lf)),
+                None => {
+                    // Step doesn't exist or empty - return empty LazyFrame
+                    Ok(IntermediateValue::LazyRows(empty_lazy_frame()))
+                }
+            }
         }
 
         Source::StepColumn { step, column } => {
-            // Load column values
-            let values = ctx.step_results().column_values(step, column)?;
-            Ok(IntermediateValue::ColumnValues(values))
+            // Return LazyFrame with column info for deferred selection
+            match ctx.step_results().lazy_frame(step)? {
+                Some(lf) => Ok(IntermediateValue::LazyColumn {
+                    frame: lf,
+                    column: column.clone(),
+                }),
+                None => {
+                    // Missing step - return empty values
+                    Ok(IntermediateValue::ColumnValues(vec![]))
+                }
+            }
         }
     }
 }
@@ -322,8 +366,19 @@ fn apply_transform(
     match transform {
         // ========== Step-level transforms ==========
         Transform::IsEmpty => {
-            let is_empty = match &input {
-                IntermediateValue::StepRows(rows) => rows.is_empty(),
+            let is_empty = match input {
+                IntermediateValue::LazyRows(lf) => {
+                    let df = lf.collect().map_err(polars_to_error)?;
+                    df.height() == 0
+                }
+                IntermediateValue::LazyColumn { frame, column } => {
+                    // Count non-null values in column
+                    let df = frame
+                        .select([col(&column)])
+                        .collect()
+                        .map_err(polars_to_error)?;
+                    df.height() == 0
+                }
                 IntermediateValue::ColumnValues(vals) => vals.is_empty(),
                 _ => return Err(Error::variable("is_empty requires step or column input")),
             };
@@ -331,8 +386,18 @@ fn apply_transform(
         }
 
         Transform::IsNotEmpty => {
-            let is_not_empty = match &input {
-                IntermediateValue::StepRows(rows) => !rows.is_empty(),
+            let is_not_empty = match input {
+                IntermediateValue::LazyRows(lf) => {
+                    let df = lf.collect().map_err(polars_to_error)?;
+                    df.height() > 0
+                }
+                IntermediateValue::LazyColumn { frame, column } => {
+                    let df = frame
+                        .select([col(&column)])
+                        .collect()
+                        .map_err(polars_to_error)?;
+                    df.height() > 0
+                }
                 IntermediateValue::ColumnValues(vals) => !vals.is_empty(),
                 _ => return Err(Error::variable("is_not_empty requires step or column input")),
             };
@@ -340,8 +405,18 @@ fn apply_transform(
         }
 
         Transform::Length => {
-            let len = match &input {
-                IntermediateValue::StepRows(rows) => rows.len(),
+            let len = match input {
+                IntermediateValue::LazyRows(lf) => {
+                    let df = lf.collect().map_err(polars_to_error)?;
+                    df.height()
+                }
+                IntermediateValue::LazyColumn { frame, column } => {
+                    let df = frame
+                        .select([col(&column)])
+                        .collect()
+                        .map_err(polars_to_error)?;
+                    df.height()
+                }
                 IntermediateValue::ColumnValues(vals) => vals.len(),
                 _ => return Err(Error::variable("length requires step or column input")),
             };
@@ -349,72 +424,105 @@ fn apply_transform(
         }
 
         Transform::Any(predicate) => {
-            let rows = match input {
-                IntermediateValue::StepRows(rows) => rows,
-                _ => return Err(Error::variable("any() requires step input")),
-            };
-            let matches = rows.iter().any(|row| predicate.evaluate(row));
-            Ok(IntermediateValue::Boolean(matches))
+            match input {
+                IntermediateValue::LazyRows(lf) => {
+                    let expr = predicate_to_polars_expr(predicate)?;
+                    let df = lf.filter(expr).collect().map_err(polars_to_error)?;
+                    Ok(IntermediateValue::Boolean(df.height() > 0))
+                }
+                _ => Err(Error::variable("any() requires step input")),
+            }
         }
 
         Transform::All(predicate) => {
-            let rows = match input {
-                IntermediateValue::StepRows(rows) => rows,
-                _ => return Err(Error::variable("all() requires step input")),
-            };
-            // Empty set returns false for all()
-            if rows.is_empty() {
-                return Ok(IntermediateValue::Boolean(false));
+            match input {
+                IntermediateValue::LazyRows(lf) => {
+                    // First check if empty (all() on empty returns false)
+                    let total_df = lf.clone().collect().map_err(polars_to_error)?;
+                    if total_df.height() == 0 {
+                        return Ok(IntermediateValue::Boolean(false));
+                    }
+
+                    // all() = total count == matching count
+                    let expr = predicate_to_polars_expr(predicate)?;
+                    let match_df = lf.filter(expr).collect().map_err(polars_to_error)?;
+                    Ok(IntermediateValue::Boolean(match_df.height() == total_df.height()))
+                }
+                _ => Err(Error::variable("all() requires step input")),
             }
-            let matches = rows.iter().all(|row| predicate.evaluate(row));
-            Ok(IntermediateValue::Boolean(matches))
         }
 
         Transform::Filter(predicate) => {
-            let rows = match input {
-                IntermediateValue::StepRows(rows) => rows,
-                _ => return Err(Error::variable("filter() requires step input")),
-            };
-            let filtered: Vec<JsonValue> = rows
-                .into_iter()
-                .filter(|row| predicate.evaluate(row))
-                .collect();
+            match input {
+                IntermediateValue::LazyRows(lf) => {
+                    let expr = predicate_to_polars_expr(predicate)?;
+                    let filtered = lf.filter(expr);
 
-            // Check if we need to extract a column (filter().column syntax)
-            if let Some(column) = &pipeline.filter_column {
-                let values = extract_column_from_rows(&filtered, column);
-                Ok(IntermediateValue::ColumnValues(values))
-            } else {
-                Ok(IntermediateValue::StepRows(filtered))
+                    // Check if we need to extract a column (filter().column syntax)
+                    if let Some(column) = &pipeline.filter_column {
+                        Ok(IntermediateValue::LazyColumn {
+                            frame: filtered,
+                            column: column.clone(),
+                        })
+                    } else {
+                        Ok(IntermediateValue::LazyRows(filtered))
+                    }
+                }
+                _ => Err(Error::variable("filter() requires step input")),
             }
         }
 
         // ========== Column transforms ==========
         Transform::First => {
-            let values = match input {
-                IntermediateValue::ColumnValues(vals) => vals,
-                IntermediateValue::StepRows(_) => {
-                    // If we have rows but need first, this is a type error
-                    return Err(Error::variable("first requires column input, not step"));
+            match input {
+                IntermediateValue::LazyColumn { frame, column } => {
+                    let df = frame
+                        .select([col(&column)])
+                        .limit(1)
+                        .collect()
+                        .map_err(polars_to_error)?;
+                    let value = extract_first_string(&df, &column)?;
+                    Ok(IntermediateValue::Scalar(value))
                 }
-                _ => return Err(Error::variable("first requires column input")),
-            };
-            let first = values.into_iter().next().unwrap_or_default();
-            Ok(IntermediateValue::Scalar(first))
+                IntermediateValue::ColumnValues(vals) => {
+                    let first = vals.into_iter().next().unwrap_or_default();
+                    Ok(IntermediateValue::Scalar(first))
+                }
+                IntermediateValue::LazyRows(_) => {
+                    Err(Error::variable("first requires column input, not step"))
+                }
+                _ => Err(Error::variable("first requires column input")),
+            }
         }
 
         Transform::At(index) => {
-            let values = match input {
-                IntermediateValue::ColumnValues(vals) => vals,
-                _ => return Err(Error::variable("at() requires column input")),
-            };
-            let value = values.into_iter().nth(*index).unwrap_or_default();
-            Ok(IntermediateValue::Scalar(value))
+            match input {
+                IntermediateValue::LazyColumn { frame, column } => {
+                    let df = frame
+                        .select([col(&column)])
+                        .slice(*index as i64, 1)
+                        .collect()
+                        .map_err(polars_to_error)?;
+                    let value = extract_first_string(&df, &column)?;
+                    Ok(IntermediateValue::Scalar(value))
+                }
+                IntermediateValue::ColumnValues(vals) => {
+                    let value = vals.into_iter().nth(*index).unwrap_or_default();
+                    Ok(IntermediateValue::Scalar(value))
+                }
+                _ => Err(Error::variable("at() requires column input")),
+            }
         }
 
         Transform::Array => {
-            let values = match input {
-                IntermediateValue::ColumnValues(vals) => vals,
+            match input {
+                IntermediateValue::LazyColumn { frame, column } => {
+                    let values = collect_column_as_strings(frame, &column)?;
+                    Ok(IntermediateValue::ColumnValues(values))
+                }
+                IntermediateValue::ColumnValues(vals) => {
+                    Ok(IntermediateValue::ColumnValues(vals))
+                }
                 IntermediateValue::Scalar(val) => {
                     // For scalars (from inputs), check if this is an array-type input
                     if let Source::Input { name } = &pipeline.source {
@@ -422,53 +530,75 @@ fn apply_transform(
                         match input_type {
                             InputType::Array => {
                                 // Split comma-separated values for array-type inputs
-                                val.split(',')
+                                let values: Vec<String> = val
+                                    .split(',')
                                     .map(|s| s.trim().to_string())
                                     .filter(|s| !s.is_empty())
-                                    .collect()
+                                    .collect();
+                                Ok(IntermediateValue::ColumnValues(values))
                             }
                             InputType::String => {
-                                return Err(Error::variable(format!(
+                                Err(Error::variable(format!(
                                     "Cannot use '| array' transform on string-type input '{}'",
                                     name
-                                )));
+                                )))
                             }
                         }
                     } else {
-                        return Err(Error::variable("array requires column or array input"));
+                        Err(Error::variable("array requires column or array input"))
                     }
                 }
-                _ => return Err(Error::variable("array requires column or array input")),
-            };
-            Ok(IntermediateValue::ColumnValues(values))
+                _ => Err(Error::variable("array requires column or array input")),
+            }
         }
 
         Transform::Unique => {
-            let values = match input {
-                IntermediateValue::ColumnValues(vals) => vals,
-                _ => return Err(Error::variable("unique requires column input")),
-            };
-            // Deduplicate while preserving order
-            let mut seen = std::collections::HashSet::new();
-            let unique: Vec<String> = values
-                .into_iter()
-                .filter(|v| seen.insert(v.clone()))
-                .collect();
-            Ok(IntermediateValue::ColumnValues(unique))
+            match input {
+                IntermediateValue::LazyColumn { frame, column } => {
+                    // Use Polars unique() - preserves first occurrence order with unique_stable
+                    let unique_frame = frame.select([col(&column).unique_stable()]);
+                    Ok(IntermediateValue::LazyColumn {
+                        frame: unique_frame,
+                        column,
+                    })
+                }
+                IntermediateValue::ColumnValues(vals) => {
+                    // Fallback for already-collected values
+                    let mut seen = std::collections::HashSet::new();
+                    let unique: Vec<String> = vals
+                        .into_iter()
+                        .filter(|v| seen.insert(v.clone()))
+                        .collect();
+                    Ok(IntermediateValue::ColumnValues(unique))
+                }
+                _ => Err(Error::variable("unique requires column input")),
+            }
         }
 
         Transform::StrJoin(sep) => {
-            let values = match input {
-                IntermediateValue::ColumnValues(vals) => vals,
-                _ => return Err(Error::variable("str_join requires column input")),
-            };
-            let joined = values.join(sep);
-            Ok(IntermediateValue::Scalar(joined))
+            match input {
+                IntermediateValue::LazyColumn { frame, column } => {
+                    let values = collect_column_as_strings(frame, &column)?;
+                    let joined = values.join(sep);
+                    Ok(IntermediateValue::Scalar(joined))
+                }
+                IntermediateValue::ColumnValues(vals) => {
+                    let joined = vals.join(sep);
+                    Ok(IntermediateValue::Scalar(joined))
+                }
+                _ => Err(Error::variable("str_join requires column input")),
+            }
         }
 
         Transform::ForEach => {
-            let values = match input {
-                IntermediateValue::ColumnValues(vals) => vals,
+            match input {
+                IntermediateValue::LazyColumn { frame, column } => {
+                    let values = collect_column_as_strings(frame, &column)?;
+                    Ok(IntermediateValue::ColumnValues(values))
+                }
+                IntermediateValue::ColumnValues(vals) => {
+                    Ok(IntermediateValue::ColumnValues(vals))
+                }
                 IntermediateValue::Scalar(val) => {
                     // For scalars (from inputs), check if this is an array-type input
                     if let Source::Input { name } = &pipeline.source {
@@ -476,26 +606,26 @@ fn apply_transform(
                         match input_type {
                             InputType::Array => {
                                 // Split comma-separated values for array-type inputs
-                                val.split(',')
+                                let values: Vec<String> = val
+                                    .split(',')
                                     .map(|s| s.trim().to_string())
                                     .filter(|s| !s.is_empty())
-                                    .collect()
+                                    .collect();
+                                Ok(IntermediateValue::ColumnValues(values))
                             }
                             InputType::String => {
-                                return Err(Error::variable(format!(
+                                Err(Error::variable(format!(
                                     "Cannot use '| for_each' transform on string-type input '{}'",
                                     name
-                                )));
+                                )))
                             }
                         }
                     } else {
-                        return Err(Error::variable("for_each requires column or array input"));
+                        Err(Error::variable("for_each requires column or array input"))
                     }
                 }
-                _ => return Err(Error::variable("for_each requires column or array input")),
-            };
-            // Return as-is, will be handled by SubstitutionBuilder
-            Ok(IntermediateValue::ColumnValues(values))
+                _ => Err(Error::variable("for_each requires column or array input")),
+            }
         }
 
         // ========== Comparison transforms ==========
@@ -584,6 +714,7 @@ where
 }
 
 /// Extract column values from JSON rows.
+#[allow(dead_code)]
 fn extract_column_from_rows(rows: &[JsonValue], column: &str) -> Vec<String> {
     rows.iter()
         .filter_map(|row| row.get(column))
@@ -593,6 +724,7 @@ fn extract_column_from_rows(rows: &[JsonValue], column: &str) -> Vec<String> {
 }
 
 /// Convert a JSON value to a string.
+#[allow(dead_code)]
 fn json_value_to_string(value: &JsonValue) -> String {
     match value {
         JsonValue::String(s) => s.clone(),
@@ -611,15 +743,121 @@ fn intermediate_to_result(
     match value {
         IntermediateValue::Scalar(s) => Ok(TransformResult::Scalar(s)),
         IntermediateValue::ColumnValues(values) => {
-            // Check if this was from a for_each (handled separately)
             Ok(TransformResult::Array(values))
         }
         IntermediateValue::Integer(n) => Ok(TransformResult::Scalar(n.to_string())),
         IntermediateValue::Boolean(b) => Ok(TransformResult::Boolean(b)),
-        IntermediateValue::StepRows(_) => {
+        IntermediateValue::LazyRows(_) => {
             Err(Error::variable("Step reference requires a transform"))
         }
+        IntermediateValue::LazyColumn { column, .. } => {
+            Err(Error::variable(format!(
+                "Column '{}' reference requires a transform (first, array, etc.)",
+                column
+            )))
+        }
     }
+}
+
+// ========== Polars Helper Functions ==========
+
+/// Convert a Polars error to our error type.
+#[allow(dead_code)]
+fn polars_to_error(e: PolarsError) -> Error {
+    Error::variable(format!("Polars error: {}", e))
+}
+
+/// Collect a column from a LazyFrame as Vec<String>.
+///
+/// Filters out null values and empty strings.
+#[allow(dead_code)]
+fn collect_column_as_strings(lf: LazyFrame, column: &str) -> Result<Vec<String>> {
+    let df = lf
+        .select([col(column)])
+        .collect()
+        .map_err(polars_to_error)?;
+
+    let polars_col = df
+        .column(column)
+        .map_err(|_| Error::variable(format!("Column '{}' not found", column)))?;
+
+    // Convert Column to Series for iteration
+    let series = polars_col.as_materialized_series();
+    let mut values = Vec::with_capacity(series.len());
+
+    for i in 0..series.len() {
+        match series.get(i) {
+            Ok(AnyValue::Null) => continue,
+            Ok(AnyValue::String(s)) => {
+                if !s.is_empty() {
+                    values.push(s.to_string());
+                }
+            }
+            Ok(other) => {
+                let s = format!("{}", other);
+                if !s.is_empty() {
+                    values.push(s);
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    Ok(values)
+}
+
+/// Extract the first value from a single-column DataFrame as a String.
+///
+/// Returns empty string if the DataFrame is empty or the value is null.
+#[allow(dead_code)]
+fn extract_first_string(df: &DataFrame, column: &str) -> Result<String> {
+    if df.height() == 0 {
+        return Ok(String::new());
+    }
+
+    let polars_col = df
+        .column(column)
+        .map_err(|_| Error::variable(format!("Column '{}' not found", column)))?;
+
+    let series = polars_col.as_materialized_series();
+
+    match series.get(0) {
+        Ok(AnyValue::Null) => Ok(String::new()),
+        Ok(AnyValue::String(s)) => Ok(s.to_string()),
+        Ok(other) => Ok(format!("{}", other)),
+        Err(_) => Ok(String::new()),
+    }
+}
+
+/// Convert a Predicate to a Polars filter expression.
+///
+/// Translates our predicate syntax (field op value) into Polars Expr.
+#[allow(dead_code)]
+fn predicate_to_polars_expr(predicate: &Predicate) -> Result<Expr> {
+    let field_expr = col(&predicate.field);
+
+    let value_expr: Expr = match &predicate.value {
+        PredicateValue::Bool(b) => lit(*b),
+        PredicateValue::Number(n) => lit(*n),
+        PredicateValue::String(s) => lit(s.clone()),
+    };
+
+    let expr = match predicate.op {
+        ComparisonOp::Eq => field_expr.eq(value_expr),
+        ComparisonOp::Neq => field_expr.neq(value_expr),
+        ComparisonOp::Gt => field_expr.gt(value_expr),
+        ComparisonOp::Gte => field_expr.gt_eq(value_expr),
+        ComparisonOp::Lt => field_expr.lt(value_expr),
+        ComparisonOp::Lte => field_expr.lt_eq(value_expr),
+    };
+
+    Ok(expr)
+}
+
+/// Create an empty LazyFrame for cases where step doesn't exist.
+#[allow(dead_code)]
+fn empty_lazy_frame() -> LazyFrame {
+    DataFrame::empty().lazy()
 }
 
 #[cfg(test)]

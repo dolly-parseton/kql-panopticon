@@ -3,6 +3,7 @@
 //! Provides a container for all step results in an execution.
 
 use crate::error::Result;
+use polars::prelude::LazyFrame;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
@@ -104,6 +105,32 @@ impl ResultContext {
         match self.handles.get(step_name) {
             Some(h) => h.materialize(),
             None => Ok(vec![]),
+        }
+    }
+
+    /// Get a LazyFrame for a step's results
+    ///
+    /// Returns `None` if the step doesn't exist, the file is missing, or the file is empty.
+    /// Use this for efficient Polars-based operations with query pushdown.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// if let Some(lf) = ctx.lazy_frame("step_name")? {
+    ///     let filtered = lf.filter(col("score").gt(lit(90))).collect()?;
+    /// }
+    /// ```
+    pub fn lazy_frame(&self, step_name: &str) -> Result<Option<LazyFrame>> {
+        match self.handles.get(step_name) {
+            Some(h) if h.exists() => {
+                // Check if file is empty - Polars can't parse empty JSONL
+                if h.is_empty()? {
+                    return Ok(None);
+                }
+                Ok(Some(h.lazy_frame()?))
+            }
+            Some(_) => Ok(None), // Handle exists but file doesn't
+            None => Ok(None),    // No handle
         }
     }
 
