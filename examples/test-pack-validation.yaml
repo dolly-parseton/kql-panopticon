@@ -1,0 +1,31 @@
+name: Test Validation Pack
+description: Pack for testing input validation
+version: "1.0"
+
+acquisition:
+  inputs:
+    - name: required_input
+      label: Required Input
+      description: This input is required and has no default
+      required: true
+      example: "test-value"
+
+    - name: optional_with_default
+      label: Optional Input with Default
+      description: This input is optional with a default
+      required: false
+      default: "default-value"
+
+    - name: optional_no_default
+      label: Optional Input without Default
+      description: This input is optional without a default
+      required: false
+
+  steps:
+    - name: test_query
+      type: kql
+      query: |
+        SigninLogs
+        | where TimeGenerated > ago(1d)
+        | take 1
+      timespan: P1D

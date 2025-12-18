@@ -1,0 +1,10 @@
+# Test Pack - Folder Structure Example
+#
+# Demonstrates folder-based pack organization using datatables
+# to simulate query results for testing.
+
+name: Test Pack (Folder Example)
+description: |
+  A test pack demonstrating folder-based structure and datatable queries.
+  Uses simulated data that works without any actual log data.
+version: "1.0"

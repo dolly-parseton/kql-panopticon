@@ -1,0 +1,1037 @@
+kind: investigation
+name: "ZAP Pending Action Triage"
+description: |
+  Triage AIR ZAP (Zero-hour Auto Purge) pending actions by gathering
+  "fail early" indicators to determine if the flagged email is:
+
+  - TRUE POSITIVE: Genuine phishing requiring remediation approval
+  - BENIGN POSITIVE: Spam/marketing that can be safely approved
+  - FALSE POSITIVE: Legitimate email that should be rejected
+
+  Fail-early indicators (suggesting FP/benign):
+  - High sender volume with low quarantine rate (marketing)
+  - Microsoft/known service sender domains
+  - All URLs are Microsoft/tracking domains
+  - No threat detections on attachments
+  - Passed SPF/DKIM/DMARC authentication
+
+  High-risk indicators (suggesting true positive):
+  - User clicked through to malicious URL
+  - Threat detections on attachments
+  - High quarantine rate from sender
+  - Failed authentication
+version: "1.0"
+
+inputs:
+  - name: investigation_id
+    description: "The ZAP InvestigationId from the alert (e.g., urn:ZappedEmailInvestigation:abc123)"
+    required: true
+  - name: subscription_id
+    description: "Azure subscription ID for Sentinel enrichment API calls"
+    required: true
+  - name: resource_group
+    description: "Resource group name containing the Sentinel workspace"
+    required: true
+  - name: workspace_name
+    description: "Log Analytics workspace name for Sentinel"
+    required: true
+
+steps:
+  # ===========================================================================
+  # STEP 1: INVESTIGATION CONTEXT
+  # ===========================================================================
+  # Extract email details from the CloudAppEvents AIR investigation data
+  - name: investigation_context
+    query: |
+      CloudAppEvents
+      | where ActionType == "AirInvestigationData"
+      | extend InvestigationId = tostring(RawEventData['InvestigationId'])
+      | where InvestigationId == '{{inputs.investigation_id}}'
+      | extend
+          InvestigationType = tostring(RawEventData['InvestigationType']),
+          Status = tostring(RawEventData['Status']),
+          InvestigationURL = tostring(RawEventData['DeepLinkUrl'])
+      | mv-expand Entity = parse_json(tostring(RawEventData['Data'])).Entities
+      | where Entity['Type'] == 'mailMessage'
+      // DEBUG: Output raw entity to see actual property names
+      | extend RawEntity = tostring(Entity)
+      // Try multiple possible property name patterns
+      | extend
+          NetworkMessageId = coalesce(
+              tostring(Entity['networkMessageId']),
+              tostring(Entity['NetworkMessageId']),
+              tostring(Entity['Identifier']),
+              tostring(Entity['Id'])
+          ),
+          SenderDomain = coalesce(
+              tostring(Entity['p1SenderDomain']),
+              tostring(Entity['P1SenderDomain']),
+              tostring(Entity['SenderDomain']),
+              tostring(Entity['senderDomain'])
+          ),
+          SenderAddress = coalesce(
+              tostring(Entity['p1Sender']),
+              tostring(Entity['P1Sender']),
+              tostring(Entity['SenderAddress']),
+              tostring(Entity['sender'])
+          ),
+          SenderDisplayName = coalesce(
+              tostring(Entity['p2SenderDisplayName']),
+              tostring(Entity['P2SenderDisplayName']),
+              tostring(Entity['SenderDisplayName']),
+              tostring(Entity['displayName'])
+          ),
+          Recipient = coalesce(
+              tostring(Entity['recipient']),
+              tostring(Entity['Recipient']),
+              tostring(Entity['RecipientAddress'])
+          ),
+          Subject = coalesce(
+              tostring(Entity['subject']),
+              tostring(Entity['Subject'])
+          ),
+          Threats = coalesce(
+              tostring(Entity['threats']),
+              tostring(Entity['Threats']),
+              tostring(Entity['ThreatTypes'])
+          ),
+          SenderIP = coalesce(
+              tostring(Entity['senderIP']),
+              tostring(Entity['SenderIP']),
+              tostring(Entity['SourceIP'])
+          ),
+          DeliveryAction = coalesce(
+              tostring(Entity['deliveryAction']),
+              tostring(Entity['DeliveryAction'])
+          )
+      | project
+          TimeGenerated,
+          InvestigationId,
+          InvestigationType,
+          Status,
+          InvestigationURL,
+          NetworkMessageId,
+          SenderDomain,
+          SenderAddress,
+          SenderDisplayName,
+          Recipient,
+          Subject,
+          Threats,
+          SenderIP,
+          DeliveryAction,
+          RawEntity
+
+  # ===========================================================================
+  # STEP 2: EMAIL DETAILS FROM EmailEvents
+  # ===========================================================================
+  # Get full email metadata including authentication details
+  - name: email_details
+    depends_on: [investigation_context]
+    options:
+      dedupe: true
+    query: |
+      EmailEvents
+      | where NetworkMessageId in ({{investigation_context.*.NetworkMessageId}})
+      | extend
+          AuthDetails = parse_json(AuthenticationDetails),
+          SPF = tostring(parse_json(AuthenticationDetails)[0].SPF),
+          DKIM = tostring(parse_json(AuthenticationDetails)[0].DKIM),
+          DMARC = tostring(parse_json(AuthenticationDetails)[0].DMARC)
+      | extend
+          AuthPassed = SPF == "pass" and DKIM == "pass" and DMARC == "pass",
+          IsMicrosoftSender = SenderFromDomain has_any ("microsoft.com", "office.com", "office365.com", "outlook.com"),
+          HasBulkIndicator = BulkComplaintLevel > 0
+      | project
+          TimeGenerated,
+          NetworkMessageId,
+          Subject,
+          SenderFromAddress,
+          SenderFromDomain,
+          SenderDisplayName,
+          RecipientEmailAddress,
+          DeliveryAction,
+          DeliveryLocation,
+          ThreatTypes,
+          ThreatNames,
+          DetectionMethods,
+          ConfidenceLevel,
+          BulkComplaintLevel,
+          UrlCount,
+          AttachmentCount,
+          SPF,
+          DKIM,
+          DMARC,
+          AuthPassed,
+          IsMicrosoftSender,
+          HasBulkIndicator,
+          EmailDirection
+
+  # ===========================================================================
+  # STEP 2b: EXTRACT ROOT DOMAINS FOR WHOIS LOOKUP
+  # ===========================================================================
+  # Extract root/registrable domain from sender domains (strip subdomains)
+  # e.g., em1254.dailytacoma.com -> dailytacoma.com
+  - name: root_domains
+    depends_on: [investigation_context]
+    options:
+      dedupe: true
+    query: |
+      datatable(SenderDomain: string) [{{investigation_context.*.SenderDomain}}]
+      | extend DomainParts = split(SenderDomain, ".")
+      | extend PartCount = array_length(DomainParts)
+      // Handle common TLDs - take last 2 parts for standard TLDs, last 3 for ccTLDs like .co.uk
+      | extend IsCompoundTld = DomainParts[PartCount - 2] in ("co", "com", "org", "net", "gov", "edu", "ac")
+                               and PartCount >= 3
+      | extend RootDomain = iff(
+          IsCompoundTld and PartCount >= 3,
+          strcat(DomainParts[PartCount - 3], ".", DomainParts[PartCount - 2], ".", DomainParts[PartCount - 1]),
+          iff(PartCount >= 2,
+              strcat(DomainParts[PartCount - 2], ".", DomainParts[PartCount - 1]),
+              SenderDomain)
+      )
+      | project SenderDomain, RootDomain
+      // Filter out invalid domains (null senders show as "<>", empty strings, etc.)
+      | where isnotempty(RootDomain)
+          and RootDomain !in ("<>", ".", "..")
+          and RootDomain matches regex @"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)+$"
+      | distinct RootDomain
+
+  # ===========================================================================
+  # STEP 2c: WHOIS DOMAIN LOOKUP (Sentinel Enrichment API)
+  # ===========================================================================
+  # Look up domain registration age via Microsoft Sentinel's enrichment API
+  # New domains (< 30 days) are higher risk for phishing
+  - name: domain_whois
+    type: http
+    depends_on: [root_domains]
+    foreach: "root_domains as domain"
+    on_empty: skip
+
+    request:
+      method: POST
+      url: "https://management.azure.com/subscriptions/{{inputs.subscription_id}}/resourceGroups/{{inputs.resource_group}}/providers/Microsoft.OperationalInsights/workspaces/{{inputs.workspace_name}}/providers/Microsoft.SecurityInsights/enrichment/main/listWhoisByDomain?api-version=2025-07-01-preview"
+      auth: azure
+      headers:
+        Content-Type: "application/json"
+      body:
+        domain: "{{domain.RootDomain}}"
+
+    response:
+      fields:
+        domain: "$.domain"
+        created: "$.created"
+        updated: "$.updated"
+        expires: "$.expires"
+        registrar_name: "$.parsedWhois.registrar.name"
+        registrar_abuse_email: "$.parsedWhois.registrar.abuseContactEmail"
+        registrant_org: "$.parsedWhois.contacts.registrant.org"
+        registrant_country: "$.parsedWhois.contacts.registrant.country"
+        name_servers: "$.parsedWhois.nameServers"
+        statuses: "$.parsedWhois.statuses"
+
+    # Continue even if WHOIS lookup fails (domain may be private/unavailable)
+    on_error: continue
+
+    # Rate limit to avoid throttling
+    rate_limit:
+      requests: 5
+      per: second
+
+  # ===========================================================================
+  # STEP 3a: SENDER DOMAIN REPUTATION (30d)
+  # ===========================================================================
+  # Analyze sender domain history - high volume + low block = likely marketing
+  - name: sender_reputation
+    depends_on: [investigation_context, root_domains]
+    when: "{{root_domains | length | gt(0)}}"
+    options:
+      dedupe: true
+    query: |
+      EmailEvents
+      | where TimeGenerated > ago(30d)
+      | where SenderFromDomain in ({{root_domains.*.RootDomain}})
+          or SenderMailFromDomain in ({{root_domains.*.RootDomain}})
+      | extend SenderDomain = coalesce(SenderFromDomain, SenderMailFromDomain)
+      | summarize
+          TotalEmails = count(),
+          UniqueRecipients = dcount(RecipientEmailAddress),
+          UniqueSenders = dcount(SenderFromAddress),
+          // Delivery breakdown
+          InboxCount = countif(DeliveryLocation has "Inbox"),
+          JunkCount = countif(DeliveryLocation == "Junk"),
+          QuarantineCount = countif(DeliveryLocation == "Quarantine"),
+          BlockedCount = countif(DeliveryAction == "Blocked"),
+          // Threat breakdown
+          PhishCount = countif(ThreatTypes has "Phish"),
+          MalwareCount = countif(ThreatTypes has "Malware"),
+          SpamCount = countif(ThreatTypes has "Spam"),
+          CleanCount = countif(isempty(ThreatTypes) or ThreatTypes == "[]"),
+          // Bulk indicator
+          AvgBulkComplaintLevel = avg(BulkComplaintLevel),
+          MaxBulkComplaintLevel = max(BulkComplaintLevel)
+          by SenderDomain
+      | extend
+          InboxRate = round(100.0 * InboxCount / TotalEmails, 1),
+          QuarantineRate = round(100.0 * QuarantineCount / TotalEmails, 1),
+          BlockRate = round(100.0 * BlockedCount / TotalEmails, 1),
+          ThreatRate = round(100.0 * (PhishCount + MalwareCount) / TotalEmails, 1)
+      | extend
+          // FAIL-EARLY: High volume + low threat = marketing/legitimate
+          // Threshold of 20 accounts for weekends and missing days in a 30-day window
+          FailEarly_LikelyMarketing = TotalEmails >= 20 and QuarantineRate < 5 and SpamCount > 0,
+          FailEarly_LikelyLegitimate = TotalEmails >= 20 and ThreatRate < 2 and InboxRate > 80,
+          // HIGH-RISK: High quarantine rate
+          HighRisk_HighQuarantineRate = QuarantineRate > 30
+      | project
+          SenderDomain,
+          TotalEmails,
+          UniqueRecipients,
+          UniqueSenders,
+          InboxRate,
+          QuarantineRate,
+          BlockRate,
+          ThreatRate,
+          PhishCount,
+          MalwareCount,
+          SpamCount,
+          AvgBulkComplaintLevel,
+          FailEarly_LikelyMarketing,
+          FailEarly_LikelyLegitimate,
+          HighRisk_HighQuarantineRate
+
+  # ===========================================================================
+  # STEP 3b: URL ANALYSIS
+  # ===========================================================================
+  # Analyze URLs in the email - Microsoft/tracking URLs = likely FP
+  - name: url_analysis
+    depends_on: [investigation_context, email_details]
+    when: "{{email_details | any(UrlCount > 0)}}"
+    options:
+      dedupe: true
+    query: |
+      EmailUrlInfo
+      | where NetworkMessageId in ({{investigation_context.*.NetworkMessageId}})
+      | extend UrlDomainLower = tolower(UrlDomain)
+      | extend
+          IsMicrosoftDomain = UrlDomainLower has_any (
+              "microsoft.com", "office.com", "office365.com",
+              "sharepoint.com", "onedrive.com", "live.com",
+              "outlook.com", "azure.com", "windows.net",
+              "aka.ms", "go.microsoft.com"
+          ),
+          IsTrackingUrl = UrlDomainLower has_any (
+              "click.", "track.", "open.", "link.", "go.",
+              "email.", "mail.", "notify.", "cdn."
+          ),
+          IsKnownSafeService = UrlDomainLower has_any (
+              "google.com", "linkedin.com", "twitter.com",
+              "facebook.com", "youtube.com", "github.com"
+          )
+      | summarize
+          TotalUrls = count(),
+          UniqueUrlDomains = dcount(UrlDomain),
+          UrlDomains = make_set(UrlDomain, 20),
+          UrlLocations = make_set(UrlLocation),
+          MicrosoftUrlCount = countif(IsMicrosoftDomain),
+          TrackingUrlCount = countif(IsTrackingUrl),
+          KnownSafeCount = countif(IsKnownSafeService),
+          SampleUrls = make_set(Url, 10)
+          by NetworkMessageId
+      | extend
+          // FAIL-EARLY: All URLs are Microsoft/tracking = likely FP
+          FailEarly_AllMicrosoftUrls = MicrosoftUrlCount == TotalUrls and TotalUrls > 0,
+          FailEarly_MostlyTrackingUrls = TrackingUrlCount > TotalUrls / 2,
+          FailEarly_AllKnownSafe = (MicrosoftUrlCount + KnownSafeCount) == TotalUrls and TotalUrls > 0
+      | project
+          NetworkMessageId,
+          TotalUrls,
+          UniqueUrlDomains,
+          MicrosoftUrlCount,
+          TrackingUrlCount,
+          KnownSafeCount,
+          FailEarly_AllMicrosoftUrls,
+          FailEarly_MostlyTrackingUrls,
+          FailEarly_AllKnownSafe,
+          UrlDomains,
+          UrlLocations,
+          SampleUrls
+
+  # ===========================================================================
+  # STEP 3c: ATTACHMENT ANALYSIS
+  # ===========================================================================
+  # Check attachment threat verdicts - threats = high risk
+  - name: attachment_analysis
+    depends_on: [investigation_context, email_details]
+    when: "{{email_details | any(AttachmentCount > 0)}}"
+    options:
+      dedupe: true
+    query: |
+      EmailAttachmentInfo
+      | where NetworkMessageId in ({{investigation_context.*.NetworkMessageId}})
+      | extend
+          HasThreat = isnotempty(ThreatTypes) and ThreatTypes != "[]",
+          FileExtLower = tolower(FileType)
+      | extend
+          IsHighRiskExtension = FileExtLower in (
+              "exe", "dll", "scr", "bat", "cmd", "ps1", "vbs",
+              "js", "jar", "hta", "iso", "img", "vhd", "lnk"
+          ),
+          IsDocumentExtension = FileExtLower in (
+              "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "rtf"
+          ),
+          IsArchiveExtension = FileExtLower in (
+              "zip", "rar", "7z", "tar", "gz"
+          ),
+          IsImageExtension = FileExtLower in (
+              "jpg", "jpeg", "png", "gif", "bmp", "svg", "ico"
+          )
+      | summarize
+          TotalAttachments = count(),
+          ThreatAttachments = countif(HasThreat),
+          HighRiskExtensions = countif(IsHighRiskExtension),
+          DocumentExtensions = countif(IsDocumentExtension),
+          ArchiveExtensions = countif(IsArchiveExtension),
+          ImageExtensions = countif(IsImageExtension),
+          ThreatTypes = make_set(ThreatTypes),
+          ThreatNames = make_set(ThreatNames),
+          DetectionMethods = make_set(DetectionMethods),
+          FileNames = make_set(FileName, 10),
+          SHA256Hashes = make_set(SHA256, 10)
+          by NetworkMessageId
+      | extend
+          // HIGH-RISK: Threat detection on attachment
+          HighRisk_ThreatAttachment = ThreatAttachments > 0,
+          HighRisk_HighRiskExtension = HighRiskExtensions > 0,
+          // FAIL-EARLY: Only images = likely marketing
+          FailEarly_OnlyImages = ImageExtensions == TotalAttachments and TotalAttachments > 0,
+          FailEarly_NoAttachments = TotalAttachments == 0
+      | project
+          NetworkMessageId,
+          TotalAttachments,
+          ThreatAttachments,
+          HighRiskExtensions,
+          HighRisk_ThreatAttachment,
+          HighRisk_HighRiskExtension,
+          FailEarly_OnlyImages,
+          FailEarly_NoAttachments,
+          ThreatTypes,
+          ThreatNames,
+          FileNames,
+          SHA256Hashes
+
+  # ===========================================================================
+  # STEP 3d: URL CLICK ACTIVITY
+  # ===========================================================================
+  # Check if users clicked URLs - clicked through = HIGH RISK
+  - name: click_activity
+    depends_on: [investigation_context]
+    options:
+      dedupe: true
+    query: |
+      UrlClickEvents
+      | where TimeGenerated > ago(7d)
+      | where NetworkMessageId in ({{investigation_context.*.NetworkMessageId}})
+      | extend
+          ClickBlocked = ActionType has "Blocked",
+          ClickedThrough = IsClickedThrough
+      | summarize
+          TotalClicks = count(),
+          UniqueUsers = dcount(AccountUpn),
+          BlockedClicks = countif(ClickBlocked),
+          ClicksThroughToUrl = countif(ClickedThrough),
+          Workloads = make_set(Workload),
+          ThreatTypesAtClick = make_set(ThreatTypes),
+          DetectionMethods = make_set(DetectionMethods),
+          ClickingUsers = make_set(AccountUpn, 20),
+          ClickedUrls = make_set(Url, 10),
+          FirstClick = min(TimeGenerated),
+          LastClick = max(TimeGenerated)
+          by NetworkMessageId
+      | extend
+          // HIGH-RISK: User clicked through to potentially malicious URL
+          HighRisk_UserClickedThrough = ClicksThroughToUrl > 0,
+          // Additional context
+          AllClicksBlocked = BlockedClicks == TotalClicks and TotalClicks > 0
+      | project
+          NetworkMessageId,
+          TotalClicks,
+          UniqueUsers,
+          ClicksThroughToUrl,
+          BlockedClicks,
+          HighRisk_UserClickedThrough,
+          AllClicksBlocked,
+          ThreatTypesAtClick,
+          Workloads,
+          ClickingUsers,
+          ClickedUrls,
+          FirstClick,
+          LastClick
+
+  # ===========================================================================
+  # STEP 4: CAMPAIGN SCOPE
+  # ===========================================================================
+  # Find similar emails from the same sender - mass campaign = spam/marketing
+  - name: campaign_scope
+    depends_on: [investigation_context, root_domains]
+    when: "{{root_domains | length | gt(0)}}"
+    options:
+      dedupe: true
+    query: |
+      EmailEvents
+      | where TimeGenerated > ago(7d)
+      | where SenderFromDomain in ({{root_domains.*.RootDomain}})
+          or SenderMailFromDomain in ({{root_domains.*.RootDomain}})
+      | summarize
+          TotalEmails = count(),
+          UniqueMessageIds = dcount(NetworkMessageId),
+          UniqueRecipients = dcount(RecipientEmailAddress),
+          UniqueSubjects = dcount(Subject),
+          Subjects = make_set(Subject, 10),
+          DeliveryActions = make_set(DeliveryAction),
+          DeliveryLocations = make_set(DeliveryLocation),
+          ThreatTypes = make_set(ThreatTypes),
+          FirstSeen = min(TimeGenerated),
+          LastSeen = max(TimeGenerated)
+          by SenderFromDomain, SenderFromAddress
+      | extend
+          // FAIL-EARLY: Mass campaign with consistent delivery = marketing
+          FailEarly_MassCampaign = UniqueRecipients > 20,
+          FailEarly_ConsistentSender = UniqueSubjects < 5 and TotalEmails > 10
+      | project
+          SenderFromDomain,
+          SenderFromAddress,
+          TotalEmails,
+          UniqueMessageIds,
+          UniqueRecipients,
+          UniqueSubjects,
+          FailEarly_MassCampaign,
+          FailEarly_ConsistentSender,
+          Subjects,
+          DeliveryActions,
+          DeliveryLocations,
+          ThreatTypes,
+          FirstSeen,
+          LastSeen
+      | order by TotalEmails desc
+      | take 20
+
+  # ===========================================================================
+  # STEP 5: POST-DELIVERY ACTIONS
+  # ===========================================================================
+  # See what ZAP and other post-delivery actions occurred
+  - name: post_delivery_actions
+    depends_on: [investigation_context]
+    options:
+      dedupe: true
+    query: |
+      EmailPostDeliveryEvents
+      | where TimeGenerated > ago(7d)
+      | where NetworkMessageId in ({{investigation_context.*.NetworkMessageId}})
+      | project
+          TimeGenerated,
+          NetworkMessageId,
+          RecipientEmailAddress,
+          Action,
+          ActionType,
+          ActionTrigger,
+          ActionResult,
+          DeliveryLocation,
+          ThreatTypes,
+          DetectionMethods
+      | order by TimeGenerated asc
+
+  # ===========================================================================
+  # STEP 6: SENDER ADDRESS HISTORY
+  # ===========================================================================
+  # Detailed history for the specific sender (not just domain)
+  # Uses actual sender from EmailEvents rather than bounce address from AIR
+  - name: sender_address_history
+    depends_on: [email_details]
+    options:
+      dedupe: true
+    query: |
+      EmailEvents
+      | where TimeGenerated > ago(30d)
+      | where SenderFromAddress in ({{email_details.*.SenderFromAddress}})
+      | summarize
+          TotalEmails = count(),
+          UniqueRecipients = dcount(RecipientEmailAddress),
+          FirstSeen = min(TimeGenerated),
+          LastSeen = max(TimeGenerated)
+          by SenderFromAddress
+      | extend
+          DaysSinceFirstSeen = datetime_diff('day', now(), FirstSeen)
+      | project
+          SenderFromAddress,
+          TotalEmails,
+          UniqueRecipients,
+          DaysSinceFirstSeen,
+          FirstSeen,
+          LastSeen
+
+# ===========================================================================
+# REPORT CONFIGURATION
+# ===========================================================================
+report:
+  format: markdown
+  output: "report-{{timestamp}}.md"
+
+  verdict_rules:
+    # High-risk indicators - immediate concern
+    - name: user_clicked_malicious
+      condition: "click_activity.any(HighRisk_UserClickedThrough == true)"
+      level: "CRITICAL"
+      summary: "User clicked through to potentially malicious URL"
+      recommendation: "Approve ZAP action immediately. Investigate affected users for compromise indicators."
+
+    - name: threat_attachment
+      condition: "attachment_analysis.any(HighRisk_ThreatAttachment == true)"
+      level: "HIGH"
+      summary: "Attachment has active threat detection"
+      recommendation: "Approve ZAP action. Review attachment threat indicators for IOCs."
+
+    - name: high_quarantine_sender
+      condition: "sender_reputation.any(HighRisk_HighQuarantineRate == true)"
+      level: "HIGH"
+      summary: "Sender domain has high quarantine rate (>30%)"
+      recommendation: "Approve ZAP action. Consider blocking sender domain."
+
+    # Fail-early indicators - likely false positive
+    - name: marketing_sender
+      condition: "sender_reputation.any(FailEarly_LikelyMarketing == true) and click_activity.length == 0"
+      level: "LOW - LIKELY BENIGN"
+      summary: "Sender is likely legitimate marketing/newsletter"
+      recommendation: "Reject ZAP action. Add sender to safe list if desired."
+
+    - name: all_safe_urls
+      condition: "url_analysis.any(FailEarly_AllMicrosoftUrls == true) or url_analysis.any(FailEarly_AllKnownSafe == true)"
+      level: "LOW - LIKELY FALSE POSITIVE"
+      summary: "All URLs are Microsoft or known-safe services"
+      recommendation: "Reject ZAP action. Email appears legitimate."
+
+    - name: legitimate_sender
+      condition: "sender_reputation.any(FailEarly_LikelyLegitimate == true) and email_details.any(AuthPassed == true)"
+      level: "LOW - LIKELY FALSE POSITIVE"
+      summary: "Legitimate sender with passed authentication"
+      recommendation: "Reject ZAP action. Email appears legitimate."
+
+    - name: mass_campaign
+      condition: "campaign_scope.any(FailEarly_MassCampaign == true) and sender_reputation.any(ThreatRate < 5)"
+      level: "LOW - LIKELY BENIGN"
+      summary: "Mass email campaign with low threat rate"
+      recommendation: "Reject ZAP action. Appears to be bulk marketing/newsletter."
+
+    # Default fallback
+    - name: requires_review
+      condition: "true"
+      level: "MEDIUM - REQUIRES REVIEW"
+      summary: "No clear indicators - manual review required"
+      recommendation: "Review all findings before making a decision."
+
+  template: |
+    # ZAP Pending Action Triage Report
+
+    **Investigation:** {{ meta.investigation_name }}
+    **Generated:** {{ meta.timestamp }}
+    **Status:** {{ meta.status }}
+
+    ---
+
+    ## Verdict
+
+    **Level:** {{ verdict.level }}
+
+    **Summary:** {{ verdict.summary }}
+
+    **Recommendation:** {{ verdict.recommendation }}
+
+    ---
+
+    ## Anomalies Detected
+
+    {% if investigation_context %}{% for ctx in investigation_context | unique(field="NetworkMessageId") %}{% if ctx.SenderDomain == "<>" or ctx.SenderDomain == "" %}
+    ⚠️ **NULL SENDER DETECTED** - Email has no envelope sender (P1Sender). This is highly suspicious and commonly used in phishing attacks to evade sender-based filtering.
+    {% endif %}{% if ctx.SenderIP %}
+    - **Sender IP:** {{ ctx.SenderIP }}{% endif %}{% endfor %}{% endif %}
+    {% if email_details %}{% for email in email_details %}{% if email.AuthPassed == false %}
+    ⚠️ **AUTHENTICATION FAILED** - SPF/DKIM/DMARC checks did not pass.
+    {% endif %}{% endfor %}{% endif %}
+
+    ---
+
+    ## Investigation Context
+
+    {% if investigation_context %}
+    {% for ctx in investigation_context | unique(field="NetworkMessageId") %}
+    | Field | Value |
+    |-------|-------|
+    | Investigation ID | {{ ctx.InvestigationId }} |
+    | Type | {{ ctx.InvestigationType }} |
+    | Status | {{ ctx.Status }} |
+    | Network Message ID | {{ ctx.NetworkMessageId }} |
+    | Sender | {% if ctx.SenderAddress == "<>" or ctx.SenderAddress == "" %}⚠️ *Empty (null sender)*{% else %}{{ ctx.SenderAddress }}{% endif %} |
+    | Sender Display | {{ ctx.SenderDisplayName | default(value="N/A") }} |
+    | Sender Domain | {% if ctx.SenderDomain == "<>" or ctx.SenderDomain == "" %}⚠️ *Empty (null sender)*{% else %}{{ ctx.SenderDomain }}{% endif %} |
+    | Sender IP | {{ ctx.SenderIP | default(value="N/A") }} |
+    | Recipient | {{ ctx.Recipient }} |
+    | Subject | {{ ctx.Subject }} |
+    | Threats | {{ ctx.Threats | default(value="None detected") }} |
+    | Delivery Action | {{ ctx.DeliveryAction }} |
+    {% endfor %}
+    {% else %}
+    No investigation context available.
+    {% endif %}
+
+    ---
+
+    ## Email Details
+
+    {% if email_details %}
+    {% for email in email_details %}
+    | Field | Value |
+    |-------|-------|
+    | Subject | {{ email.Subject }} |
+    | From | {{ email.SenderFromAddress }} |
+    | To | {{ email.RecipientEmailAddress }} |
+    | Delivery Action | {{ email.DeliveryAction }} |
+    | Delivery Location | {{ email.DeliveryLocation }} |
+    | Threat Types | {{ email.ThreatTypes }} |
+    | Threat Names | {{ email.ThreatNames }} |
+    | Detection Methods | {{ email.DetectionMethods }} |
+    | Confidence | {{ email.ConfidenceLevel }} |
+    | Bulk Level | {{ email.BulkComplaintLevel }} |
+    | URL Count | {{ email.UrlCount }} |
+    | Attachment Count | {{ email.AttachmentCount }} |
+
+    ### Authentication
+    | Check | Result |
+    |-------|--------|
+    | SPF | {{ email.SPF }} |
+    | DKIM | {{ email.DKIM }} |
+    | DMARC | {{ email.DMARC }} |
+    | **All Passed** | {{ email.AuthPassed }} |
+
+    {% endfor %}
+    {% else %}
+    No email details available.
+    {% endif %}
+
+    ---
+
+    ## Domain WHOIS (Registration Age)
+
+    {% if domain_whois %}
+    {% for whois in domain_whois %}
+    ### {{ whois.domain }}
+
+    | Field | Value |
+    |-------|-------|
+    | Domain | {{ whois.domain }} |
+    | Created | {{ whois.created }} |
+    | Updated | {{ whois.updated }} |
+    | Expires | {{ whois.expires }} |
+    | Registrar | {{ whois.registrar_name }} |
+    | Registrar Abuse Email | {{ whois.registrar_abuse_email }} |
+    | Registrant Org | {{ whois.registrant_org }} |
+    | Registrant Country | {{ whois.registrant_country }} |
+    | Name Servers | {{ whois.name_servers }} |
+    | Status | {{ whois.statuses }} |
+
+    {% if whois._error %}
+    **WHOIS Lookup Error:** {{ whois._error }}
+    {% endif %}
+
+    {% endfor %}
+    {% else %}
+    No WHOIS data available (lookup may have failed or domain is private).
+    {% endif %}
+
+    ---
+
+    ## Sender Domain Reputation (30 days)
+
+    {% if sender_reputation %}
+    {% for rep in sender_reputation %}
+    ### {{ rep.SenderDomain }}
+
+    | Metric | Value |
+    |--------|-------|
+    | Total Emails | {{ rep.TotalEmails }} |
+    | Unique Recipients | {{ rep.UniqueRecipients }} |
+    | Unique Senders | {{ rep.UniqueSenders }} |
+    | Inbox Rate | {{ rep.InboxRate }}% |
+    | Quarantine Rate | {{ rep.QuarantineRate }}% |
+    | Block Rate | {{ rep.BlockRate }}% |
+    | Threat Rate | {{ rep.ThreatRate }}% |
+    | Phish Count | {{ rep.PhishCount }} |
+    | Malware Count | {{ rep.MalwareCount }} |
+    | Spam Count | {{ rep.SpamCount }} |
+    | Avg Bulk Level | {{ rep.AvgBulkComplaintLevel | default_nan(value="N/A") }} |
+
+    **Indicators:**
+    - Likely Marketing: {{ rep.FailEarly_LikelyMarketing }}
+    - Likely Legitimate: {{ rep.FailEarly_LikelyLegitimate }}
+    - High Quarantine Rate: {{ rep.HighRisk_HighQuarantineRate }}
+    {% endfor %}
+    {% else %}
+    No sender reputation data available.
+    {% endif %}
+
+    ---
+
+    ## URL Analysis
+
+    {% if url_analysis %}
+    {% for urls in url_analysis %}
+    | Metric | Value |
+    |--------|-------|
+    | Total URLs | {{ urls.TotalUrls }} |
+    | Unique Domains | {{ urls.UniqueUrlDomains }} |
+    | Microsoft URLs | {{ urls.MicrosoftUrlCount }} |
+    | Tracking URLs | {{ urls.TrackingUrlCount }} |
+    | Known Safe | {{ urls.KnownSafeCount }} |
+
+    **Indicators:**
+    - All Microsoft URLs: {{ urls.FailEarly_AllMicrosoftUrls }}
+    - Mostly Tracking URLs: {{ urls.FailEarly_MostlyTrackingUrls }}
+    - All Known Safe: {{ urls.FailEarly_AllKnownSafe }}
+
+    **URL Domains Found:**
+    ```
+    {{ urls.UrlDomains }}
+    ```
+
+    **Sample URLs:**
+    ```
+    {{ urls.SampleUrls }}
+    ```
+    {% endfor %}
+    {% else %}
+    No URL analysis data available.
+    {% endif %}
+
+    ---
+
+    ## Attachment Analysis
+
+    {% if attachment_analysis %}
+    {% for att in attachment_analysis %}
+    | Metric | Value |
+    |--------|-------|
+    | Total Attachments | {{ att.TotalAttachments }} |
+    | Threat Attachments | {{ att.ThreatAttachments }} |
+    | High-Risk Extensions | {{ att.HighRiskExtensions }} |
+
+    **Indicators:**
+    - Threat Detected: {{ att.HighRisk_ThreatAttachment }}
+    - High-Risk Extension: {{ att.HighRisk_HighRiskExtension }}
+    - Only Images: {{ att.FailEarly_OnlyImages }}
+
+    **Files:** {{ att.FileNames }}
+
+    **Threat Types:** {{ att.ThreatTypes }}
+    {% endfor %}
+    {% else %}
+    No attachments in this email.
+    {% endif %}
+
+    ---
+
+    ## Click Activity
+
+    {% if click_activity %}
+    {% for click in click_activity %}
+    | Metric | Value |
+    |--------|-------|
+    | Total Clicks | {{ click.TotalClicks }} |
+    | Unique Users | {{ click.UniqueUsers }} |
+    | Clicks Through | {{ click.ClicksThroughToUrl }} |
+    | Blocked Clicks | {{ click.BlockedClicks }} |
+
+    **Indicators:**
+    - User Clicked Through: {{ click.HighRisk_UserClickedThrough }}
+    - All Clicks Blocked: {{ click.AllClicksBlocked }}
+
+    **Clicking Users:** {{ click.ClickingUsers }}
+
+    **First Click:** {{ click.FirstClick }}
+    **Last Click:** {{ click.LastClick }}
+    {% endfor %}
+    {% else %}
+    No click activity detected.
+    {% endif %}
+
+    ---
+
+    ## Campaign Scope (7 days)
+
+    {% if campaign_scope %}
+    | Sender | Emails | Recipients | Subjects | Marketing | Consistent |
+    |--------|--------|------------|----------|-----------|------------|{% for camp in campaign_scope %}
+    | {% if camp.SenderFromAddress == "" %}*Empty*{% else %}{{ camp.SenderFromAddress }}{% endif %} | {{ camp.TotalEmails }} | {{ camp.UniqueRecipients }} | {{ camp.UniqueSubjects }} | {{ camp.FailEarly_MassCampaign }} | {{ camp.FailEarly_ConsistentSender }} |{% endfor %}
+
+    {% else %}
+    No campaign data available.
+    {% endif %}
+
+    ---
+
+    ## Post-Delivery Actions
+
+    {% if post_delivery_actions %}
+    | Time | Action | Trigger | Result | Location |
+    |------|--------|---------|--------|----------|{% for pda in post_delivery_actions %}
+    | {{ pda.TimeGenerated }} | {{ pda.Action }} | {{ pda.ActionTrigger }} | {{ pda.ActionResult }} | {{ pda.DeliveryLocation }} |{% endfor %}
+
+    {% else %}
+    No post-delivery actions recorded.
+    {% endif %}
+
+    ---
+
+    ## Sender Address History (30 days)
+
+    {% if sender_address_history %}
+    | Sender | Emails | Recipients | Days Active | First Seen |
+    |--------|--------|------------|-------------|------------|{% for hist in sender_address_history %}
+    | {% if hist.SenderFromAddress == "" %}⚠️ *Empty (null sender)*{% else %}{{ hist.SenderFromAddress }}{% endif %} | {{ hist.TotalEmails }} | {{ hist.UniqueRecipients }} | {{ hist.DaysSinceFirstSeen }} | {{ hist.FirstSeen }} |{% endfor %}
+
+    {% else %}
+    No sender history available.
+    {% endif %}
+
+    ---
+
+    {% if scoring %}
+    ## Risk Scoring
+
+    **Total Score:** {{ scoring.total_score }}
+    **Assessment:** {{ scoring.level }}
+
+    ### Contributing Factors
+    {% if scoring.matched_indicators %}
+    | Indicator | Weight | Description |
+    |-----------|--------|-------------|{% for ind in scoring.matched_indicators %}
+    | {{ ind.name }} | {{ ind.weight }} | {{ ind.description | default_nan(value="") }} |{% endfor %}
+
+    {% else %}
+    No risk indicators matched.
+    {% endif %}
+
+    ---
+    {% endif %}
+
+    *Report generated by kql-panopticon*
+
+# ===========================================================================
+# SCORING ENGINE
+# ===========================================================================
+scoring:
+  indicators:
+    # HIGH-RISK indicators (positive weights)
+    - name: user_clicked_malicious
+      condition: "click_activity.any(HighRisk_UserClickedThrough == true)"
+      weight: 50
+      description: "User clicked through to potentially malicious URL"
+
+    - name: threat_attachment
+      condition: "attachment_analysis.any(HighRisk_ThreatAttachment == true)"
+      weight: 40
+      description: "Attachment has active threat detection"
+
+    - name: high_risk_extension
+      condition: "attachment_analysis.any(HighRisk_HighRiskExtension == true)"
+      weight: 25
+      description: "Attachment has high-risk file extension"
+
+    - name: high_quarantine_rate
+      condition: "sender_reputation.any(HighRisk_HighQuarantineRate == true)"
+      weight: 30
+      description: "Sender domain has >30% quarantine rate"
+
+    - name: failed_authentication
+      condition: "email_details.any(AuthPassed == false)"
+      weight: 15
+      description: "Email failed SPF/DKIM/DMARC authentication"
+
+    - name: new_sender
+      condition: "sender_address_history.length == 0"
+      weight: 10
+      description: "Sender has no prior email history"
+
+    - name: null_sender
+      condition: "root_domains.length == 0"
+      weight: 25
+      description: "Email has null/empty sender (P1Sender) - common phishing evasion technique"
+
+    # LOW-RISK indicators (negative weights)
+    - name: marketing_sender
+      condition: "sender_reputation.any(FailEarly_LikelyMarketing == true)"
+      weight: -30
+      description: "Sender matches marketing/newsletter pattern"
+
+    - name: legitimate_sender
+      condition: "sender_reputation.any(FailEarly_LikelyLegitimate == true)"
+      weight: -25
+      description: "Sender has established legitimate history"
+
+    - name: all_microsoft_urls
+      condition: "url_analysis.any(FailEarly_AllMicrosoftUrls == true)"
+      weight: -20
+      description: "All URLs point to Microsoft domains"
+
+    - name: all_known_safe_urls
+      condition: "url_analysis.any(FailEarly_AllKnownSafe == true)"
+      weight: -15
+      description: "All URLs are Microsoft or known-safe services"
+
+    - name: no_attachments
+      condition: "attachment_analysis.length == 0 or attachment_analysis.any(FailEarly_NoAttachments == true)"
+      weight: -10
+      description: "Email has no attachments"
+
+    - name: only_image_attachments
+      condition: "attachment_analysis.any(FailEarly_OnlyImages == true)"
+      weight: -10
+      description: "Attachments are only images (marketing pattern)"
+
+    - name: no_click_activity
+      condition: "click_activity.length == 0"
+      weight: -5
+      description: "No users clicked any URLs"
+
+    - name: high_inbox_rate
+      condition: "sender_reputation.any(InboxRate > 90)"
+      weight: -15
+      description: "Sender has >90% inbox delivery rate"
+
+    - name: established_sender
+      condition: "sender_address_history.any(DaysSinceFirstSeen > 14)"
+      weight: -20
+      description: "Sender has been active for >14 days"
+
+  thresholds:
+    - level: "CRITICAL - TRUE POSITIVE"
+      min_score: 50
+      summary: "Risk score {{score}} indicates high-confidence threat"
+      recommendation: "Approve ZAP action immediately. Initiate incident response."
+
+    - level: "HIGH - SUSPICIOUS"
+      min_score: 25
+      summary: "Risk score {{score}} indicates elevated risk"
+      recommendation: "Approve ZAP action. Monitor for related activity."
+
+    - level: "MEDIUM - REQUIRES REVIEW"
+      min_score: 0
+      summary: "Risk score {{score}} - manual review recommended"
+      recommendation: "Review all indicators before deciding."
+
+    - level: "LOW - LIKELY BENIGN"
+      min_score: -25
+      summary: "Risk score {{score}} suggests low threat probability"
+      recommendation: "Consider rejecting ZAP action. May be false positive."
+
+    - level: "MINIMAL - FALSE POSITIVE"
+      min_score: -100
+      summary: "Risk score {{score}} strongly suggests false positive"
+      recommendation: "Reject ZAP action. Add sender to safe list if needed."

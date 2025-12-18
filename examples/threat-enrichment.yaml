@@ -1,0 +1,186 @@
+# Threat Enrichment Pack
+#
+# Demonstrates HTTP iteration with threat intelligence enrichment.
+# Queries for suspicious IPs, then enriches each with threat intelligence.
+#
+# Usage:
+#   panopticon-cli examples/threat-enrichment.yaml
+#   panopticon-cli examples/threat-enrichment.yaml --input min_failed_logins=10
+
+name: Threat Enrichment
+description: |
+  Identify suspicious IPs from sign-in failures and enrich with
+  threat intelligence via external API.
+version: "1.0"
+
+acquisition:
+  inputs:
+    - name: min_failed_logins
+      label: Minimum Failed Logins
+      description: Threshold for considering an IP suspicious
+      required: false
+      default: "5"
+      example: "5"
+
+  secrets:
+    # API key from environment variable (optional)
+    threat_api_key: ${THREAT_INTEL_API_KEY}
+
+  steps:
+    # Step 1: Find IPs with high failed login counts
+    - name: suspicious_ips
+      type: kql
+      query: |
+        SigninLogs
+        | where TimeGenerated > ago(7d)
+        | where ResultType != "0"
+        | summarize
+            FailedAttempts = count(),
+            TargetedUsers = dcount(UserPrincipalName),
+            UserList = make_set(UserPrincipalName, 5),
+            Countries = make_set(Location, 3),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated)
+          by IPAddress
+        | where FailedAttempts >= {{inputs.min_failed_logins}}
+        | order by FailedAttempts desc
+        | take 20
+      timespan: P7D
+
+    # Step 2: Enrich each suspicious IP with threat intel
+    # Uses for_each transform to iterate over step results
+    - name: ip_enrichment
+      type: http
+      depends_on: [suspicious_ips]
+      when: "{{suspicious_ips | is_not_empty}}"
+      request:
+        method: GET
+        url: "https://api.abuseipdb.com/api/v2/check"
+        params:
+          ipAddress: "{{suspicious_ips.IPAddress | for_each}}"
+          maxAgeInDays: "90"
+        headers:
+          Key: "{{secrets.threat_api_key}}"
+          Accept: "application/json"
+      response:
+        fields:
+          ip_address: "$.data.ipAddress"
+          is_public: "$.data.isPublic"
+          abuse_confidence: "$.data.abuseConfidenceScore"
+          country_code: "$.data.countryCode"
+          isp: "$.data.isp"
+          domain: "$.data.domain"
+          total_reports: "$.data.totalReports"
+          last_reported: "$.data.lastReportedAt"
+      rate_limit:
+        requests: 10
+        per: second
+      on_error: continue
+
+    # Step 3: Correlate with original sign-in data
+    - name: correlate
+      type: kql
+      depends_on: [suspicious_ips, ip_enrichment]
+      when: "{{ip_enrichment | is_not_empty}}"
+      query: |
+        // Get high-risk IPs from enrichment
+        let high_risk = dynamic([{{ip_enrichment | filter(abuse_confidence > 50).ip_address | array}}]);
+        SigninLogs
+        | where TimeGenerated > ago(7d)
+        | where IPAddress in (high_risk)
+        | summarize
+            SigninCount = count(),
+            FailedCount = countif(ResultType != "0"),
+            Users = make_set(UserPrincipalName, 10)
+          by IPAddress
+        | order by FailedCount desc
+      timespan: P7D
+      on_error: continue
+
+# Processing configuration - runs per workspace after acquisition
+processing:
+  steps:
+    - name: risk_score
+      type: scoring
+      indicators:
+        - name: high_abuse_score
+          condition: "{{ip_enrichment | any(abuse_confidence > 75)}}"
+          weight: 30
+          description: IP has high abuse confidence score
+
+        - name: many_reports
+          condition: "{{ip_enrichment | any(total_reports > 100)}}"
+          weight: 20
+          description: IP has many abuse reports
+
+        - name: high_failed_logins
+          condition: "{{suspicious_ips | any(FailedAttempts > 50)}}"
+          weight: 25
+          description: High volume of failed login attempts
+
+        - name: multiple_targets
+          condition: "{{suspicious_ips | any(TargetedUsers > 10)}}"
+          weight: 15
+          description: Multiple users targeted by same IP
+
+      thresholds:
+        - level: CRITICAL
+          min_score: 60
+          summary: Critical threat indicators detected
+          recommendation: Immediate investigation and IP blocking recommended
+
+        - level: HIGH
+          min_score: 40
+          summary: Significant threat indicators detected
+          recommendation: Review affected accounts and consider blocking
+
+        - level: MEDIUM
+          min_score: 20
+          summary: Moderate threat indicators detected
+          recommendation: Monitor affected IPs and users
+
+        - level: LOW
+          min_score: 0
+          summary: Low risk detected
+          recommendation: Continue standard monitoring
+
+# Report definitions - generated after processing
+reporting:
+  reports:
+    - name: threat-report
+      format: markdown
+      output: "threat-report.md"
+      template: |
+        # Threat Enrichment Report
+
+        Generated: {{ meta.timestamp }}
+
+        ## Summary
+
+        - Suspicious IPs found: {{ suspicious_ips | length }}
+        - IPs enriched: {{ ip_enrichment | length }}
+
+        ## Risk Assessment
+
+        **Score:** {{ processing.risk_score.score }}
+        **Level:** {{ processing.risk_score.level }}
+
+        {{ processing.risk_score.summary }}
+
+        ## High-Risk IPs
+
+        {% for ip in ip_enrichment %}
+        {% if ip.abuse_confidence > 50 %}
+        - **{{ ip.ip_address }}**: Abuse Score {{ ip.abuse_confidence }}, {{ ip.total_reports }} reports ({{ ip.isp }})
+        {% endif %}
+        {% endfor %}
+
+        ## Matched Indicators
+
+        {% for indicator in processing.risk_score.matched_indicators %}
+        - {{ indicator.name }} (+{{ indicator.weight }})
+        {% endfor %}
+
+        ## Recommendations
+
+        {{ processing.risk_score.recommendation }}

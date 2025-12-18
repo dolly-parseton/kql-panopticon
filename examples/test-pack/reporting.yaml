@@ -1,0 +1,100 @@
+# Reporting configuration
+# Multiple report definitions with conditional generation
+
+reports:
+  # Executive summary - always generated
+  - name: executive-summary
+    format: markdown
+    output: "executive-summary.md"
+    template: |
+      # Security Assessment Summary
+
+      **Generated:** {{ meta.timestamp }}
+      **Workspace:** {{ meta.workspace }}
+      **Subscription:** {{ meta.subscription }}
+
+      ## Risk Assessment
+
+      | Metric | Value |
+      |--------|-------|
+      | Score | {{ processing.risk_assessment.score }} |
+      | Level | {{ processing.risk_assessment.level }} |
+
+      {% if processing.risk_assessment.summary %}{{ processing.risk_assessment.summary }}{% endif %}
+
+      ## Key Findings
+
+      ### Sign-in Activity
+      {% for row in signins %}
+      - **{{ row.UserPrincipalName }}**: {{ row.TotalSignins }} sign-ins, {{ row.TotalFailed }} failed ({{ row.FailureRate }}% failure rate)
+      {% endfor %}
+
+      ### IP Reputation
+      {% for ip in ip_activity %}
+      - **{{ ip.IPAddress }}**: {{ ip.ThreatCategory }}{% if ip.IsSuspicious %} - SUSPICIOUS{% endif %}
+      {% endfor %}
+
+      ## Recommendation
+
+      {% if processing.risk_assessment.recommendation %}{{ processing.risk_assessment.recommendation }}{% endif %}
+
+  # Technical details - always generated
+  - name: technical-details
+    format: markdown
+    output: "technical-details.md"
+    template: |
+      # Technical Investigation Report
+
+      **Generated:** {{ meta.timestamp }}
+
+      ## Matched Risk Indicators
+
+      {% for indicator in processing.risk_assessment.matched_indicators %}
+      - **{{ indicator.name }}** (+{{ indicator.weight }} points)
+        - {{ indicator.description }}
+      {% endfor %}
+
+      ## Correlation Analysis
+
+      {% for row in correlation %}
+      ### {{ row.UserPrincipalName }}
+      - IP Count: {{ row.IPCount }}
+      - Suspicious IPs: {{ row.SuspiciousIPCount }}
+      - Risk Score: {{ row.RiskScore }}
+      {% endfor %}
+
+      ## Security Alerts
+
+      {% for alert in alerts %}
+      - {{ alert.UserPrincipalName }}: {{ alert.AlertName }} (High: {{ alert.HighSeverity }}, Medium: {{ alert.MediumSeverity }}, Low: {{ alert.LowSeverity }})
+      {% endfor %}
+
+      ## Raw Data Summary
+
+      - Sign-in records: {{ signins | length }}
+      - IP records: {{ ip_activity | length }}
+      - Correlation records: {{ correlation | length }}
+      - Alert records: {{ alerts | length }}
+
+  # High-risk alert - always generated (Tera template handles conditional content)
+  - name: high-risk-alert
+    format: markdown
+    output: "ALERT-high-risk.md"
+    template: |
+      # HIGH RISK ALERT
+
+      **Risk Level:** {{ processing.risk_assessment.level }}
+      **Score:** {{ processing.risk_assessment.score }}
+
+      {% if processing.risk_assessment.summary %}{{ processing.risk_assessment.summary }}{% endif %}
+
+      ## Immediate Actions Required
+
+      1. Review all matched indicators below
+      2. {% if processing.risk_assessment.recommendation %}{{ processing.risk_assessment.recommendation }}{% endif %}
+
+      ## Matched Indicators
+
+      {% for indicator in processing.risk_assessment.matched_indicators %}
+      - {{ indicator.name }}: {% if indicator.description %}{{ indicator.description }}{% endif %}
+      {% endfor %}

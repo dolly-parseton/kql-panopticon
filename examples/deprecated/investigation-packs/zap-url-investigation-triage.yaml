@@ -1,0 +1,708 @@
+kind: investigation
+name: "ZAP URL Investigation Triage"
+description: |
+  Triage AIR ZAP (Zero-hour Auto Purge) URL investigations by analyzing
+  the URLs that triggered the investigation.
+
+  This pack is designed for urn:ZappedUrlInvestigation:* investigations
+  where the primary threat vector is malicious URLs within emails.
+
+  Key analysis areas:
+  - URL domain extraction and WHOIS lookup (domain age, registrar)
+  - Suspicious URL pattern detection (random subdomains, unusual TLDs)
+  - Click activity analysis (did users click?)
+  - Sender IP reputation (sender address often spoofed/null)
+
+  High-risk indicators:
+  - Recently registered domains (< 30 days)
+  - Random/generated subdomain patterns
+  - User clicked through to URL
+  - Unusual TLDs (.com.de, .co.cc, etc.)
+
+  Lower-risk indicators:
+  - Well-known domains (Microsoft, Google, etc.)
+  - Old domain registration (> 1 year)
+  - All clicks blocked
+version: "1.0"
+
+inputs:
+  - name: investigation_id
+    description: "The ZAP InvestigationId from the alert (e.g., urn:ZappedUrlInvestigation:abc123)"
+    required: true
+  - name: subscription_id
+    description: "Azure subscription ID for Sentinel enrichment API calls"
+    required: true
+  - name: resource_group
+    description: "Resource group name containing the Sentinel workspace"
+    required: true
+  - name: workspace_name
+    description: "Log Analytics workspace name for Sentinel"
+    required: true
+
+steps:
+  # ===========================================================================
+  # STEP 1: INVESTIGATION CONTEXT - Extract URLs from RawEntity
+  # ===========================================================================
+  - name: investigation_context
+    query: |
+      CloudAppEvents
+      | where ActionType == "AirInvestigationData"
+      | extend InvestigationId = tostring(RawEventData['InvestigationId'])
+      | where InvestigationId == '{{inputs.investigation_id}}'
+      | extend
+          InvestigationType = tostring(RawEventData['InvestigationType']),
+          Status = tostring(RawEventData['Status']),
+          InvestigationURL = tostring(RawEventData['DeepLinkUrl'])
+      | mv-expand Entity = parse_json(tostring(RawEventData['Data'])).Entities
+      | where Entity['Type'] == 'mailMessage'
+      | extend
+          NetworkMessageId = coalesce(
+              tostring(Entity['networkMessageId']),
+              tostring(Entity['NetworkMessageId'])
+          ),
+          Recipient = coalesce(
+              tostring(Entity['recipient']),
+              tostring(Entity['Recipient'])
+          ),
+          Subject = coalesce(
+              tostring(Entity['subject']),
+              tostring(Entity['Subject'])
+          ),
+          SenderIP = coalesce(
+              tostring(Entity['senderIP']),
+              tostring(Entity['SenderIP'])
+          ),
+          P1Sender = coalesce(
+              tostring(Entity['p1Sender']),
+              tostring(Entity['P1Sender'])
+          ),
+          P1SenderDomain = coalesce(
+              tostring(Entity['p1SenderDomain']),
+              tostring(Entity['P1SenderDomain'])
+          ),
+          DeliveryAction = tostring(Entity['DeliveryAction']),
+          DeliveryLocation = tostring(Entity['DeliveryLocation']),
+          Language = tostring(Entity['Language']),
+          // Extract URLs array from entity
+          UrlsRaw = tostring(Entity['Urls']),
+          Threats = tostring(Entity['Threats']),
+          RawEntity = tostring(Entity)
+      | project
+          TimeGenerated,
+          InvestigationId,
+          InvestigationType,
+          Status,
+          InvestigationURL,
+          NetworkMessageId,
+          Recipient,
+          Subject,
+          SenderIP,
+          P1Sender,
+          P1SenderDomain,
+          DeliveryAction,
+          DeliveryLocation,
+          Language,
+          UrlsRaw,
+          Threats,
+          RawEntity
+      | summarize arg_max(TimeGenerated, *) by NetworkMessageId
+
+  # ===========================================================================
+  # STEP 2: EXTRACT UNIQUE URL DOMAINS
+  # ===========================================================================
+  # Parse URLs from RawEntity and extract unique domains for analysis
+  - name: url_domains
+    depends_on: [investigation_context]
+    query: |
+      let UrlData = datatable(UrlsRaw: string) [{{investigation_context.*.UrlsRaw}}];
+      UrlData
+      | mv-expand Url = parse_json(UrlsRaw)
+      | extend Url = tostring(Url)
+      | where isnotempty(Url)
+      | extend ParsedUrl = parse_url(Url)
+      | extend
+          UrlDomain = tostring(ParsedUrl.Host),
+          UrlScheme = tostring(ParsedUrl.Scheme),
+          UrlPath = tostring(ParsedUrl.Path)
+      | where isnotempty(UrlDomain)
+      // Extract root domain (strip subdomains for WHOIS)
+      | extend DomainParts = split(UrlDomain, ".")
+      | extend PartCount = array_length(DomainParts)
+      | extend IsCompoundTld = DomainParts[PartCount - 2] in ("co", "com", "org", "net", "gov", "edu", "ac") and PartCount >= 3
+      | extend RootDomain = iff(
+          IsCompoundTld and PartCount >= 3,
+          strcat(DomainParts[PartCount - 3], ".", DomainParts[PartCount - 2], ".", DomainParts[PartCount - 1]),
+          iff(PartCount >= 2,
+              strcat(DomainParts[PartCount - 2], ".", DomainParts[PartCount - 1]),
+              UrlDomain)
+      )
+      // Detect suspicious patterns
+      | extend
+          HasRandomSubdomain = UrlDomain matches regex @"^[a-z]+[0-9]+\." or UrlDomain matches regex @"^[0-9]+[a-z]+\.",
+          IsUnusualTld = RootDomain matches regex @"\.(com\.[a-z]{2}|co\.[a-z]{2}|xyz|top|club|online|site|info|cc|tk|ml|ga|cf|gq)$",
+          IsMicrosoftDomain = UrlDomain has_any ("microsoft.com", "office.com", "sharepoint.com", "onedrive.com", "live.com", "outlook.com", "azure.com"),
+          IsKnownSafe = UrlDomain has_any ("google.com", "linkedin.com", "facebook.com", "twitter.com", "youtube.com", "github.com")
+      | summarize
+          Urls = make_set(Url, 50),
+          UrlCount = dcount(Url),
+          take_any(UrlScheme),
+          take_any(HasRandomSubdomain),
+          take_any(IsUnusualTld),
+          take_any(IsMicrosoftDomain),
+          take_any(IsKnownSafe)
+          by RootDomain, UrlDomain
+      | extend
+          IsSuspicious = (HasRandomSubdomain or IsUnusualTld) and not(IsMicrosoftDomain) and not(IsKnownSafe)
+      | project
+          RootDomain,
+          UrlDomain,
+          UrlCount,
+          HasRandomSubdomain,
+          IsUnusualTld,
+          IsMicrosoftDomain,
+          IsKnownSafe,
+          IsSuspicious,
+          Urls
+
+  # ===========================================================================
+  # STEP 3: WHOIS LOOKUP FOR URL DOMAINS
+  # ===========================================================================
+  # Look up domain registration for suspicious domains
+  - name: domain_whois
+    type: http
+    depends_on: [url_domains]
+    foreach: "url_domains as domain"
+    on_empty: skip
+    # Only lookup non-Microsoft, non-known-safe domains
+    when: "{{url_domains | any(IsMicrosoftDomain == false)}} and {{url_domains | any(IsKnownSafe == false)}}"
+
+    request:
+      method: POST
+      url: "https://management.azure.com/subscriptions/{{inputs.subscription_id}}/resourceGroups/{{inputs.resource_group}}/providers/Microsoft.OperationalInsights/workspaces/{{inputs.workspace_name}}/providers/Microsoft.SecurityInsights/enrichment/main/listWhoisByDomain?api-version=2025-07-01-preview"
+      auth: azure
+      headers:
+        Content-Type: "application/json"
+      body:
+        domain: "{{domain.RootDomain}}"
+
+    response:
+      fields:
+        domain: "$.domain"
+        created: "$.created"
+        updated: "$.updated"
+        expires: "$.expires"
+        registrar_name: "$.parsedWhois.registrar.name"
+        registrar_abuse_email: "$.parsedWhois.registrar.abuseContactEmail"
+        registrant_org: "$.parsedWhois.contacts.registrant.org"
+        registrant_country: "$.parsedWhois.contacts.registrant.country"
+
+    on_error: continue
+    rate_limit:
+      requests: 5
+      per: second
+
+  # ===========================================================================
+  # STEP 4: URL CLICK ACTIVITY
+  # ===========================================================================
+  - name: click_activity
+    depends_on: [investigation_context]
+    query: |
+      UrlClickEvents
+      | where TimeGenerated > ago(7d)
+      | where NetworkMessageId in ({{investigation_context.*.NetworkMessageId}})
+      | extend
+          ClickBlocked = ActionType has "Blocked",
+          ClickedThrough = IsClickedThrough
+      | summarize
+          TotalClicks = count(),
+          UniqueUsers = dcount(AccountUpn),
+          BlockedClicks = countif(ClickBlocked),
+          ClicksThroughToUrl = countif(ClickedThrough),
+          ThreatTypesAtClick = make_set(ThreatTypes),
+          ClickingUsers = make_set(AccountUpn, 20),
+          ClickedUrls = make_set(Url, 20),
+          FirstClick = min(TimeGenerated),
+          LastClick = max(TimeGenerated)
+          by NetworkMessageId
+      | extend
+          HighRisk_UserClickedThrough = ClicksThroughToUrl > 0,
+          AllClicksBlocked = BlockedClicks == TotalClicks and TotalClicks > 0
+
+  # ===========================================================================
+  # STEP 5: EMAIL DETAILS
+  # ===========================================================================
+  - name: email_details
+    depends_on: [investigation_context]
+    query: |
+      EmailEvents
+      | where NetworkMessageId in ({{investigation_context.*.NetworkMessageId}})
+      | extend
+          AuthDetails = parse_json(AuthenticationDetails),
+          SPF = tostring(parse_json(AuthenticationDetails)[0].SPF),
+          DKIM = tostring(parse_json(AuthenticationDetails)[0].DKIM),
+          DMARC = tostring(parse_json(AuthenticationDetails)[0].DMARC)
+      | extend
+          AuthPassed = SPF == "pass" and DKIM == "pass" and DMARC == "pass",
+          HasNullSender = isempty(SenderFromAddress) or SenderFromAddress == "<>"
+      | project
+          TimeGenerated,
+          NetworkMessageId,
+          Subject,
+          SenderFromAddress,
+          SenderFromDomain,
+          SenderMailFromAddress,
+          SenderIPv4,
+          RecipientEmailAddress,
+          DeliveryAction,
+          DeliveryLocation,
+          ThreatTypes,
+          UrlCount,
+          SPF,
+          DKIM,
+          DMARC,
+          AuthPassed,
+          HasNullSender,
+          EmailDirection
+
+  # ===========================================================================
+  # STEP 6: SENDER IP ANALYSIS
+  # ===========================================================================
+  # Since sender address is often null/spoofed, analyze the sender IP
+  # Uses email_details.SenderIPv4 which comes from EmailEvents
+  - name: sender_ip_history
+    depends_on: [email_details]
+    on_error: continue
+    query: |
+      EmailEvents
+      | where TimeGenerated > ago(30d)
+      | where SenderIPv4 has_any ({{email_details.*.SenderIPv4}})
+      | where isnotempty(SenderIPv4)
+      | summarize
+          TotalEmails = count(),
+          UniqueRecipients = dcount(RecipientEmailAddress),
+          UniqueSenderAddresses = dcount(SenderFromAddress),
+          UniqueSenderDomains = dcount(SenderFromDomain),
+          SenderAddresses = make_set(SenderFromAddress, 20),
+          SenderDomains = make_set(SenderFromDomain, 20),
+          InboxCount = countif(DeliveryLocation has "Inbox"),
+          QuarantineCount = countif(DeliveryLocation == "Quarantine"),
+          PhishCount = countif(ThreatTypes has "Phish"),
+          FirstSeen = min(TimeGenerated),
+          LastSeen = max(TimeGenerated)
+          by SenderIPv4
+      | extend
+          QuarantineRate = round(100.0 * QuarantineCount / TotalEmails, 1),
+          PhishRate = round(100.0 * PhishCount / TotalEmails, 1),
+          DaysSinceFirstSeen = datetime_diff('day', now(), FirstSeen),
+          // High sender diversity from same IP is suspicious
+          HighRisk_HighSenderDiversity = UniqueSenderAddresses > 10
+      | extend HighRisk_HighPhishRate = PhishRate > 20
+
+  # ===========================================================================
+  # STEP 7: POST-DELIVERY ACTIONS
+  # ===========================================================================
+  - name: post_delivery_actions
+    depends_on: [investigation_context]
+    query: |
+      EmailPostDeliveryEvents
+      | where TimeGenerated > ago(7d)
+      | where NetworkMessageId in ({{investigation_context.*.NetworkMessageId}})
+      | project
+          TimeGenerated,
+          NetworkMessageId,
+          RecipientEmailAddress,
+          Action,
+          ActionType,
+          ActionTrigger,
+          ActionResult,
+          DeliveryLocation,
+          ThreatTypes
+
+# ===========================================================================
+# REPORT CONFIGURATION
+# ===========================================================================
+report:
+  format: markdown
+  output: "report-{{timestamp}}.md"
+
+  verdict_rules:
+    # Critical - user clicked malicious URL
+    - name: user_clicked_malicious
+      condition: "click_activity.any(HighRisk_UserClickedThrough == true)"
+      level: "CRITICAL"
+      summary: "User clicked through to potentially malicious URL"
+      recommendation: "Approve ZAP action immediately. Investigate affected users for compromise indicators. Check for credential theft or malware download."
+
+    # High - suspicious domain patterns
+    - name: suspicious_url_domain
+      condition: "url_domains.any(IsSuspicious == true)"
+      level: "HIGH"
+      summary: "Email contains URLs with suspicious domain patterns"
+      recommendation: "Approve ZAP action. The URL domains show signs of phishing infrastructure (random subdomains, unusual TLDs)."
+
+    # High - sender IP has high phish rate
+    - name: malicious_sender_ip
+      condition: "sender_ip_history.any(HighRisk_HighPhishRate == true)"
+      level: "HIGH"
+      summary: "Sender IP has high historical phishing rate"
+      recommendation: "Approve ZAP action. Consider blocking sender IP."
+
+    # Medium - null sender with suspicious URLs
+    - name: null_sender_suspicious
+      condition: "email_details.any(HasNullSender == true)"
+      level: "MEDIUM - SUSPICIOUS"
+      summary: "Email has null/empty sender (evasion technique)"
+      recommendation: "Likely phishing. Review URLs carefully before approving ZAP action."
+
+    # Low - all URLs are known safe
+    - name: all_known_safe
+      condition: "url_domains.all(IsMicrosoftDomain == true) or url_domains.all(IsKnownSafe == true)"
+      level: "LOW - LIKELY FALSE POSITIVE"
+      summary: "All URLs point to Microsoft or known-safe domains"
+      recommendation: "Reject ZAP action. URLs appear legitimate."
+
+    # Default
+    - name: requires_review
+      condition: "true"
+      level: "MEDIUM - REQUIRES REVIEW"
+      summary: "No clear indicators - manual review required"
+      recommendation: "Review URL domains and click activity before deciding."
+
+  template: |
+    # ZAP URL Investigation Triage Report
+
+    **Investigation:** {{ meta.investigation_name }}
+    **Generated:** {{ meta.timestamp }}
+    **Status:** {{ meta.status }}
+
+    ---
+
+    ## Verdict
+
+    **Level:** {{ verdict.level }}
+
+    **Summary:** {{ verdict.summary }}
+
+    **Recommendation:** {{ verdict.recommendation }}
+
+    ---
+
+    ## Anomalies Detected
+
+    {% if investigation_context %}{% for ctx in investigation_context %}{% if ctx.P1Sender == "<>" or ctx.P1Sender == "" %}
+    - **NULL SENDER** - Email has no envelope sender. Common phishing evasion technique.
+    {% endif %}{% if ctx.Language and ctx.Language != "en" %}
+    - **UNUSUAL LANGUAGE** - Email language detected as "{{ ctx.Language }}" which may be anomalous for recipient.
+    {% endif %}{% if ctx.SenderIP %}
+    - **Sender IP:** `{{ ctx.SenderIP }}`
+    {% endif %}{% endfor %}{% endif %}
+    {% if url_domains %}{% for domain in url_domains %}{% if domain.IsSuspicious == true %}
+    - **SUSPICIOUS DOMAIN:** `{{ domain.UrlDomain }}` (Random subdomain: {{ domain.HasRandomSubdomain }}, Unusual TLD: {{ domain.IsUnusualTld }})
+    {% endif %}{% endfor %}{% endif %}
+    {% if click_activity %}{% for click in click_activity %}{% if click.HighRisk_UserClickedThrough == true %}
+    - **USER CLICKED THROUGH** - {{ click.UniqueUsers }} user(s) clicked malicious URL!
+    {% endif %}{% endfor %}{% endif %}
+
+    ---
+
+    ## Investigation Context
+
+    {% if investigation_context %}
+    {% for ctx in investigation_context %}
+    | Field | Value |
+    |-------|-------|
+    | Investigation ID | {{ ctx.InvestigationId }} |
+    | Type | {{ ctx.InvestigationType }} |
+    | Status | {{ ctx.Status }} |
+    | Network Message ID | {{ ctx.NetworkMessageId }} |
+    | Recipient | {{ ctx.Recipient }} |
+    | Subject | {{ ctx.Subject }} |
+    | Sender IP | {{ ctx.SenderIP | default(value="N/A") }} |
+    | P1 Sender | {% if ctx.P1Sender == "<>" or ctx.P1Sender == "" %}*Empty (null sender)*{% else %}{{ ctx.P1Sender }}{% endif %} |
+    | Delivery Action | {{ ctx.DeliveryAction }} |
+    | Delivery Location | {{ ctx.DeliveryLocation }} |
+    | Language | {{ ctx.Language | default(value="N/A") }} |
+    | Threats | {{ ctx.Threats | default(value="None detected") }} |
+    | [Investigation Link]({{ ctx.InvestigationURL }}) | |
+    {% endfor %}
+    {% else %}
+    No investigation context available.
+    {% endif %}
+
+    ---
+
+    ## URL Domain Analysis
+
+    {% if url_domains %}
+    | Domain | Root Domain | URLs | Suspicious | Random Subdomain | Unusual TLD | Microsoft | Known Safe |
+    |--------|-------------|------|------------|------------------|-------------|-----------|------------|{% for domain in url_domains %}
+    | {{ domain.UrlDomain }} | {{ domain.RootDomain }} | {{ domain.UrlCount }} | {% if domain.IsSuspicious %}**YES**{% else %}No{% endif %} | {{ domain.HasRandomSubdomain }} | {{ domain.IsUnusualTld }} | {{ domain.IsMicrosoftDomain }} | {{ domain.IsKnownSafe }} |{% endfor %}
+
+    {% for domain in url_domains %}
+    ### URLs for {{ domain.UrlDomain }}
+    ```
+    {{ domain.Urls }}
+    ```
+    {% endfor %}
+    {% else %}
+    No URL domains extracted.
+    {% endif %}
+
+    ---
+
+    ## Domain WHOIS
+
+    {% if domain_whois %}
+    {% for whois in domain_whois %}
+    ### {{ whois.domain }}
+
+    | Field | Value |
+    |-------|-------|
+    | Domain | {{ whois.domain }} |
+    | Created | {{ whois.created }} |
+    | Updated | {{ whois.updated }} |
+    | Expires | {{ whois.expires }} |
+    | Registrar | {{ whois.registrar_name }} |
+    | Registrant Org | {{ whois.registrant_org }} |
+    | Registrant Country | {{ whois.registrant_country }} |
+    {% if whois._error %}
+
+    **Lookup Error:** {{ whois._error }}
+    {% endif %}
+    {% endfor %}
+    {% else %}
+    No WHOIS data available.
+    {% endif %}
+
+    ---
+
+    ## Click Activity
+
+    {% if click_activity %}
+    {% for click in click_activity %}
+    | Metric | Value |
+    |--------|-------|
+    | Total Clicks | {{ click.TotalClicks }} |
+    | Unique Users | {{ click.UniqueUsers }} |
+    | Clicks Through | {% if click.ClicksThroughToUrl > 0 %}**{{ click.ClicksThroughToUrl }}**{% else %}{{ click.ClicksThroughToUrl }}{% endif %} |
+    | Blocked Clicks | {{ click.BlockedClicks }} |
+
+    **Risk Indicators:**
+    - User Clicked Through: {% if click.HighRisk_UserClickedThrough %}**YES - INVESTIGATE**{% else %}No{% endif %}
+    - All Clicks Blocked: {{ click.AllClicksBlocked }}
+
+    {% if click.ClickingUsers %}
+    **Clicking Users:**
+    ```
+    {{ click.ClickingUsers }}
+    ```
+    {% endif %}
+
+    {% if click.ClickedUrls %}
+    **Clicked URLs:**
+    ```
+    {{ click.ClickedUrls }}
+    ```
+    {% endif %}
+
+    **First Click:** {{ click.FirstClick }}
+    **Last Click:** {{ click.LastClick }}
+    {% endfor %}
+    {% else %}
+    No click activity detected.
+    {% endif %}
+
+    ---
+
+    ## Email Details
+
+    {% if email_details %}
+    {% for email in email_details %}
+    | Field | Value |
+    |-------|-------|
+    | Subject | {{ email.Subject }} |
+    | From | {% if email.HasNullSender %}*Empty (null sender)*{% else %}{{ email.SenderFromAddress }}{% endif %} |
+    | Sender IP | {{ email.SenderIPv4 }} |
+    | To | {{ email.RecipientEmailAddress }} |
+    | Delivery | {{ email.DeliveryAction }} → {{ email.DeliveryLocation }} |
+    | URL Count | {{ email.UrlCount }} |
+    | Threat Types | {{ email.ThreatTypes | default(value="None") }} |
+
+    **Authentication:**
+    | SPF | DKIM | DMARC | All Passed |
+    |-----|------|-------|------------|
+    | {{ email.SPF }} | {{ email.DKIM }} | {{ email.DMARC }} | {{ email.AuthPassed }} |
+    {% endfor %}
+    {% else %}
+    No email details available.
+    {% endif %}
+
+    ---
+
+    ## Sender IP History (30 days)
+
+    {% if sender_ip_history %}
+    {% for ip in sender_ip_history %}
+    ### {{ ip.SenderIPv4 }}
+
+    | Metric | Value |
+    |--------|-------|
+    | Total Emails | {{ ip.TotalEmails }} |
+    | Unique Recipients | {{ ip.UniqueRecipients }} |
+    | Unique Sender Addresses | {{ ip.UniqueSenderAddresses }} |
+    | Unique Sender Domains | {{ ip.UniqueSenderDomains }} |
+    | Days Since First Seen | {{ ip.DaysSinceFirstSeen }} |
+    | Quarantine Rate | {{ ip.QuarantineRate }}% |
+    | Phish Rate | {{ ip.PhishRate }}% |
+
+    **Risk Indicators:**
+    - High Sender Diversity: {% if ip.HighRisk_HighSenderDiversity %}**YES** ({{ ip.UniqueSenderAddresses }} different senders){% else %}No{% endif %}
+    - High Phish Rate: {% if ip.HighRisk_HighPhishRate %}**YES** ({{ ip.PhishRate }}%){% else %}No{% endif %}
+
+    **Sender Addresses from this IP:**
+    ```
+    {{ ip.SenderAddresses }}
+    ```
+
+    **Sender Domains from this IP:**
+    ```
+    {{ ip.SenderDomains }}
+    ```
+    {% endfor %}
+    {% else %}
+    No sender IP history available.
+    {% endif %}
+
+    ---
+
+    ## Post-Delivery Actions
+
+    {% if post_delivery_actions %}
+    | Time | Action | Trigger | Result | Location |
+    |------|--------|---------|--------|----------|{% for pda in post_delivery_actions %}
+    | {{ pda.TimeGenerated }} | {{ pda.Action }} | {{ pda.ActionTrigger }} | {{ pda.ActionResult }} | {{ pda.DeliveryLocation }} |{% endfor %}
+
+    {% else %}
+    No post-delivery actions recorded.
+    {% endif %}
+
+    ---
+
+    {% if scoring %}
+    ## Risk Scoring
+
+    **Total Score:** {{ scoring.total_score }}
+    **Assessment:** {{ scoring.level }}
+
+    ### Contributing Factors
+    {% if scoring.matched_indicators %}
+    | Indicator | Weight | Description |
+    |-----------|--------|-------------|{% for ind in scoring.matched_indicators %}
+    | {{ ind.name }} | {{ ind.weight }} | {{ ind.description | default_nan(value="") }} |{% endfor %}
+
+    {% else %}
+    No risk indicators matched.
+    {% endif %}
+
+    ---
+    {% endif %}
+
+    *Report generated by kql-panopticon*
+
+# ===========================================================================
+# SCORING ENGINE
+# ===========================================================================
+scoring:
+  indicators:
+    # HIGH-RISK indicators (positive weights)
+    - name: user_clicked_through
+      condition: "click_activity.any(HighRisk_UserClickedThrough == true)"
+      weight: 50
+      description: "User clicked through to potentially malicious URL"
+
+    - name: suspicious_url_domain
+      condition: "url_domains.any(IsSuspicious == true)"
+      weight: 35
+      description: "URL domain has suspicious patterns (random subdomain, unusual TLD)"
+
+    - name: random_subdomain
+      condition: "url_domains.any(HasRandomSubdomain == true)"
+      weight: 20
+      description: "URL contains randomly generated subdomain"
+
+    - name: unusual_tld
+      condition: "url_domains.any(IsUnusualTld == true)"
+      weight: 15
+      description: "URL uses unusual/suspicious TLD (.com.de, .xyz, etc.)"
+
+    - name: null_sender
+      condition: "email_details.any(HasNullSender == true)"
+      weight: 20
+      description: "Email has null/empty sender - common phishing evasion"
+
+    - name: high_phish_rate_ip
+      condition: "sender_ip_history.any(HighRisk_HighPhishRate == true)"
+      weight: 30
+      description: "Sender IP has high historical phishing rate"
+
+    - name: high_sender_diversity_ip
+      condition: "sender_ip_history.any(HighRisk_HighSenderDiversity == true)"
+      weight: 15
+      description: "Many different senders from same IP - possible spam infrastructure"
+
+    - name: failed_authentication
+      condition: "email_details.any(AuthPassed == false)"
+      weight: 10
+      description: "Email failed SPF/DKIM/DMARC authentication"
+
+    # LOW-RISK indicators (negative weights)
+    - name: all_microsoft_urls
+      condition: "url_domains.all(IsMicrosoftDomain == true)"
+      weight: -40
+      description: "All URLs point to Microsoft domains"
+
+    - name: all_known_safe
+      condition: "url_domains.all(IsKnownSafe == true)"
+      weight: -30
+      description: "All URLs point to known-safe domains"
+
+    - name: no_suspicious_domains
+      condition: "not url_domains.any(IsSuspicious == true)"
+      weight: -15
+      description: "No suspicious domain patterns detected"
+
+    - name: all_clicks_blocked
+      condition: "click_activity.any(AllClicksBlocked == true)"
+      weight: -10
+      description: "All user clicks were blocked by SafeLinks"
+
+    - name: no_click_activity
+      condition: "click_activity.length == 0"
+      weight: -5
+      description: "No users clicked any URLs"
+
+  thresholds:
+    - level: "CRITICAL - USER COMPROMISED"
+      min_score: 50
+      summary: "Risk score {{score}} - User clicked malicious URL"
+      recommendation: "Approve ZAP immediately. Initiate incident response for affected users."
+
+    - level: "HIGH - MALICIOUS"
+      min_score: 30
+      summary: "Risk score {{score}} - High-confidence phishing"
+      recommendation: "Approve ZAP action. Block sender IP if recurring."
+
+    - level: "MEDIUM - SUSPICIOUS"
+      min_score: 10
+      summary: "Risk score {{score}} - Suspicious indicators present"
+      recommendation: "Review URL domains and decide based on findings."
+
+    - level: "LOW - LIKELY BENIGN"
+      min_score: -15
+      summary: "Risk score {{score}} - Low threat probability"
+      recommendation: "Consider rejecting ZAP action. May be false positive."
+
+    - level: "MINIMAL - FALSE POSITIVE"
+      min_score: -100
+      summary: "Risk score {{score}} - Likely false positive"
+      recommendation: "Reject ZAP action."
