@@ -1,65 +1,101 @@
 //! Variable parsing, substitution, and condition evaluation
 //!
-//! Provides unified variable handling and condition evaluation for pack execution.
+//! Provides unified variable handling using a pipe-based transform syntax.
 //!
 //! ## Variable Syntax
 //!
-//! The variable system supports these syntaxes:
+//! Variables use `{{source | transform | transform}}` syntax:
+//!
+//! ### Sources
 //!
 //! - `{{inputs.name}}` - User-provided input values
 //! - `{{secrets.name}}` - Environment variable secrets
-//! - `{{step.*.column}}` - All values from a column (array)
-//! - `{{step.first.column}}` - First row value
-//! - `{{step[N].column}}` - Nth row value
-//! - `{{alias.column}}` - Current row in foreach iteration
+//! - `{{step}}` - Step result (for step-level transforms)
+//! - `{{step.column}}` - Column from step result
 //!
-//! ## Condition Syntax
+//! ### Step-Level Transforms
 //!
-//! Conditions are used in `when` clauses for conditional step execution:
+//! - `| is_empty` - Boolean: true if no rows
+//! - `| is_not_empty` - Boolean: true if has rows
+//! - `| length` - Integer: row count
+//! - `| any(field > value)` - Boolean: any row matches
+//! - `| all(field == value)` - Boolean: all rows match
+//! - `| filter(field > value)` - Filtered step (chain with `.column`)
 //!
-//! - `step is empty` / `step is not empty` - Check if step has results
-//! - `step.length == N` - Check row count
-//! - `step.first.field == value` - Check first row field (aligns with variable syntax)
-//! - `step.any(field > value)` - Check if any row matches
-//! - `step.all(field == value)` - Check if all rows match
-//! - Boolean: `and`, `or`, `not`
+//! ### Column Transforms
 //!
-//! See [`condition`] module and [README](./README.md) for complete documentation.
+//! - `| first` - Scalar: first row value
+//! - `| at(N)` - Scalar: Nth row value
+//! - `| array` - Array: all values
+//! - `| unique` - Deduplicated values
+//! - `| str_join(sep)` - Scalar: joined string
+//! - `| for_each` - Iterator: triggers iteration (HTTP only)
 //!
-//! ## Execution vs Validation
+//! ### Comparison Transforms
 //!
-//! - **Execution**: Uses `SubstitutionContext` with actual step results
-//! - **Validation**: Uses `ValidationContext` with example values or placeholders
+//! - `| eq(value)` - Boolean: equals
+//! - `| neq(value)` - Boolean: not equals
+//! - `| gt(value)` - Boolean: greater than
+//! - `| gte(value)` - Boolean: greater than or equal
+//! - `| lt(value)` - Boolean: less than
+//! - `| lte(value)` - Boolean: less than or equal
+//!
+//! ## Conditions
+//!
+//! Conditions use the same syntax in `when:` clauses:
+//!
+//! ```yaml
+//! when: "{{step | is_not_empty}} and {{step | any(score > 90)}}"
+//! ```
 //!
 //! ## Example
 //!
 //! ```rust,ignore
-//! use kql_panopticon_core::variable::{substitute, evaluate_condition, SubstitutionContext};
+//! use kql_panopticon_core::variable::{
+//!     SubstitutionBuilder, EvaluationContext, ContextType,
+//!     substitute, evaluate_condition,
+//! };
 //!
-//! let context = SubstitutionContext::new()
+//! let ctx = EvaluationContext::new()
 //!     .with_input("user", "alice@example.com")
-//!     .with_step_results("logins", vec![
-//!         serde_json::json!({"IP": "10.0.0.1"}),
-//!         serde_json::json!({"IP": "10.0.0.2"}),
-//!     ]);
+//!     .with_step_results(results);
 //!
-//! // Variable substitution
-//! let query = "SigninLogs | where User == '{{inputs.user}}' | where IP in ({{logins.*.IP}})";
-//! let result = substitute(query, &context)?;
-//! // Result: SigninLogs | where User == 'alice@example.com' | where IP in ('10.0.0.1','10.0.0.2')
+//! // Simple substitution
+//! let query = "SigninLogs | where User == '{{inputs.user}}'";
+//! let resolved = substitute(query, &ctx)?;
+//!
+//! // With validation
+//! let builder = SubstitutionBuilder::new(query, &ctx)?;
+//! builder.validate(ContextType::KqlQuery)?;
+//! let resolved = builder.substitute()?;
+//!
+//! // For-each iteration (HTTP only)
+//! let builder = SubstitutionBuilder::new(url, &ctx)?;
+//! for resolved_url in builder.substitute_iter()? {
+//!     // Use each URL
+//! }
 //!
 //! // Condition evaluation
-//! let should_run = evaluate_condition("logins is not empty", &context.step_results);
-//! assert!(should_run);
+//! let should_run = evaluate_condition("{{step | is_not_empty}}", &ctx)?;
 //! ```
+//!
+//! See [README](./README.md) for complete documentation.
 
-mod condition;
-mod parser;
-mod substitution;
+// Pipe-based variable system
+mod builder;
+mod evaluation;
+mod pipeline;
+mod predicate;
+mod source;
+mod transform;
 
-pub use condition::evaluate_condition;
-pub use parser::{VarRef, VarRefType};
-pub use substitution::{
-    substitute, substitute_for_validation, substitute_for_validation_with_quote_style,
-    substitute_with_quote_style, SubstitutionContext, ValidationContext,
+// Public API
+pub use builder::{
+    contains_vars, evaluate_condition as evaluate_condition_new, substitute, ContextType,
+    SubstitutionBuilder,
 };
+pub use evaluation::{EvaluationContext, TransformResult};
+pub use pipeline::Pipeline;
+pub use predicate::{ComparisonOp, Predicate, PredicateValue};
+pub use source::Source;
+pub use transform::{Transform, TransformType};

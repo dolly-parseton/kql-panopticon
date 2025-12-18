@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::execution::progress::{ExecutionPhase, ProgressSender};
 use crate::execution::result::ResultContext;
 use crate::pack::{Processing, ProcessingStepConfig};
-use crate::variable::evaluate_condition;
+use crate::variable::{evaluate_condition_new as evaluate_condition, EvaluationContext};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -109,8 +109,20 @@ impl ProcessingPhaseHandler {
         for step in &processing.steps {
             // Check `when` condition
             if let Some(when_condition) = &step.when {
-                let condition_met =
-                    evaluate_condition(when_condition, acquisition_results);
+                // Create evaluation context from acquisition results
+                let eval_ctx = EvaluationContext::new()
+                    .with_step_results(acquisition_results.clone());
+
+                let condition_met = match evaluate_condition(when_condition, &eval_ctx) {
+                    Ok(met) => met,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Processing step '{}' when='{}' evaluation failed: {}",
+                            step.name, when_condition, e
+                        );
+                        false
+                    }
+                };
 
                 debug!(
                     "Processing step '{}' when='{}' evaluated to: {}",

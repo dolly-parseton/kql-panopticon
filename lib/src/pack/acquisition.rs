@@ -45,11 +45,11 @@ impl Acquisition {
             .collect()
     }
 
-    /// Check if any steps have dependencies
+    /// Check if any steps have dependencies or conditions
     pub fn has_dependencies(&self) -> bool {
         self.steps
             .iter()
-            .any(|s| !s.depends_on.is_empty() || s.foreach.is_some() || s.when.is_some())
+            .any(|s| !s.depends_on.is_empty() || s.when.is_some())
     }
 
     /// Get step by name

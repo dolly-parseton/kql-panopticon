@@ -9,7 +9,7 @@ use crate::execution::acquisition::{
 };
 use crate::execution::result::ResultWriter;
 use crate::pack::{AcquisitionStepType, Step};
-use crate::variable::substitute;
+use crate::variable::{ContextType, SubstitutionBuilder};
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -46,8 +46,17 @@ impl AcquisitionStepHandler for KqlStepHandler {
             Error::investigation(&step.name, "KQL step missing query")
         })?;
 
-        // Substitute variables
-        let resolved_query = substitute(query, ctx.substitution()).map_err(|e| {
+        // Substitute variables using new pipe-based system
+        let builder = SubstitutionBuilder::new(query, ctx.evaluation()).map_err(|e| {
+            Error::investigation(&step.name, format!("Variable parsing failed: {}", e))
+        })?;
+
+        // Validate: KQL steps don't support for_each
+        builder.validate(ContextType::KqlQuery).map_err(|e| {
+            Error::investigation(&step.name, format!("Variable validation failed: {}", e))
+        })?;
+
+        let resolved_query = builder.substitute().map_err(|e| {
             Error::investigation(&step.name, format!("Variable substitution failed: {}", e))
         })?;
 

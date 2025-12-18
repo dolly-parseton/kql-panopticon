@@ -6,8 +6,9 @@ use crate::error::{Error, Result};
 use crate::execution::acquisition::{
     AcquisitionContext, AcquisitionStepHandler, AcquisitionStepOutput,
 };
+use crate::execution::result::ResultWriter;
 use crate::pack::{AcquisitionStepType, HttpMethod, Step};
-use crate::variable::{substitute, SubstitutionContext};
+use crate::variable::{ContextType, EvaluationContext, SubstitutionBuilder};
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -65,96 +66,72 @@ impl AcquisitionStepHandler for HttpStepHandler {
             Error::investigation(&step.name, "HTTP step missing response configuration")
         })?;
 
-        // Substitute variables in URL
-        let url = substitute(&request.url, ctx.substitution()).map_err(|e| {
-            Error::investigation(&step.name, format!("URL substitution failed: {}", e))
+        // Check if URL uses for_each pattern
+        let url_builder = SubstitutionBuilder::new(&request.url, ctx.evaluation()).map_err(|e| {
+            Error::investigation(&step.name, format!("URL parsing failed: {}", e))
         })?;
 
-        debug!(
-            "Executing HTTP step '{}': {:?} {}",
-            step.name, request.method, url
-        );
-
-        // Build request
-        let mut req = match request.method {
-            HttpMethod::Get => self.client.get(&url),
-            HttpMethod::Post => self.client.post(&url),
-            HttpMethod::Put => self.client.put(&url),
-            HttpMethod::Delete => self.client.delete(&url),
-        };
-
-        // Add query parameters with substitution
-        for (key, value) in &request.params {
-            let resolved = substitute(value, ctx.substitution()).map_err(|e| {
-                Error::investigation(
-                    &step.name,
-                    format!("Query param '{}' substitution failed: {}", key, e),
-                )
-            })?;
-            req = req.query(&[(key, resolved)]);
-        }
-
-        // Add headers with substitution
-        for (key, value) in &request.headers {
-            let resolved = substitute(value, ctx.substitution()).map_err(|e| {
-                Error::investigation(
-                    &step.name,
-                    format!("Header '{}' substitution failed: {}", key, e),
-                )
-            })?;
-            req = req.header(key, resolved);
-        }
-
-        // Add body if present (with variable substitution)
-        if let Some(body) = &request.body {
-            let resolved_body = substitute_json_value(body, ctx.substitution(), &step.name)?;
-            req = req.json(&resolved_body);
-        }
-
-        // Execute request with timeout
-        let response = tokio::time::timeout(ctx.timeout, req.send())
-            .await
-            .map_err(|_| {
-                Error::timeout(format!(
-                    "HTTP request '{}' timed out after {:?}",
-                    step.name, ctx.timeout
-                ))
-            })?
-            .map_err(|e| Error::http(format!("HTTP request '{}' failed: {}", step.name, e)))?;
-
-        // Check status
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::http(format!(
-                "HTTP request '{}' returned {}: {}",
-                step.name,
-                status,
-                truncate_body(&body, 200)
-            )));
-        }
-
-        // Parse response as JSON
-        let json: JsonValue = response.json().await.map_err(|e| {
-            Error::http(format!(
-                "HTTP request '{}' response is not valid JSON: {}",
-                step.name, e
-            ))
+        // Validate context
+        url_builder.validate(ContextType::HttpRequest).map_err(|e| {
+            Error::investigation(&step.name, format!("URL validation failed: {}", e))
         })?;
 
-        // Extract fields using JSONPath
-        let row = extract_fields(&json, &response_config.fields).map_err(|e| {
-            Error::investigation(&step.name, format!("Field extraction failed: {}", e))
-        })?;
-
-        // Write to JSONL file
+        // Prepare writer for aggregated results
         let mut writer = ctx.writer(&step.name)?;
-        writer.write_row(&row)?;
+
+        if url_builder.has_for_each() {
+            // Iterate over for_each values
+            let iter = url_builder.substitute_iter().map_err(|e| {
+                Error::investigation(&step.name, format!("URL iteration failed: {}", e))
+            })?;
+            let urls: Result<Vec<String>> = iter.collect();
+            let urls = urls.map_err(|e| {
+                Error::investigation(&step.name, format!("URL substitution failed: {}", e))
+            })?;
+
+            debug!(
+                "Executing HTTP step '{}' with {} iterations: {:?}",
+                step.name, urls.len(), request.method
+            );
+
+            for url in urls {
+                self.execute_single_request(
+                    step,
+                    request,
+                    response_config,
+                    &url,
+                    ctx,
+                    &mut writer,
+                ).await?;
+            }
+        } else {
+            // Single request
+            let url = url_builder.substitute().map_err(|e| {
+                Error::investigation(&step.name, format!("URL substitution failed: {}", e))
+            })?;
+
+            debug!(
+                "Executing HTTP step '{}': {:?} {}",
+                step.name, request.method, url
+            );
+
+            self.execute_single_request(
+                step,
+                request,
+                response_config,
+                &url,
+                ctx,
+                &mut writer,
+            ).await?;
+        }
+
         let handle = writer.finish()?;
+        let row_count = handle.row_count()?;
 
         debug!(
-            "HTTP step '{}' completed in {:?}",
+            "HTTP step '{}' completed: {} rows in {:?}",
             step.name,
+            row_count,
             start.elapsed()
         );
 
@@ -197,6 +174,108 @@ impl AcquisitionStepHandler for HttpStepHandler {
     }
 }
 
+impl HttpStepHandler {
+    /// Execute a single HTTP request and write results to writer
+    async fn execute_single_request(
+        &self,
+        step: &Step,
+        request: &crate::pack::HttpRequest,
+        response_config: &crate::pack::HttpResponse,
+        url: &str,
+        ctx: &AcquisitionContext<'_>,
+        writer: &mut ResultWriter,
+    ) -> Result<()> {
+        // Build request
+        let mut req = match request.method {
+            HttpMethod::Get => self.client.get(url),
+            HttpMethod::Post => self.client.post(url),
+            HttpMethod::Put => self.client.put(url),
+            HttpMethod::Delete => self.client.delete(url),
+        };
+
+        // Add query parameters with substitution
+        for (key, value) in &request.params {
+            let builder = SubstitutionBuilder::new(value, ctx.evaluation()).map_err(|e| {
+                Error::investigation(
+                    &step.name,
+                    format!("Query param '{}' parsing failed: {}", key, e),
+                )
+            })?;
+            let resolved = builder.substitute().map_err(|e| {
+                Error::investigation(
+                    &step.name,
+                    format!("Query param '{}' substitution failed: {}", key, e),
+                )
+            })?;
+            req = req.query(&[(key, resolved)]);
+        }
+
+        // Add headers with substitution
+        for (key, value) in &request.headers {
+            let builder = SubstitutionBuilder::new(value, ctx.evaluation()).map_err(|e| {
+                Error::investigation(
+                    &step.name,
+                    format!("Header '{}' parsing failed: {}", key, e),
+                )
+            })?;
+            let resolved = builder.substitute().map_err(|e| {
+                Error::investigation(
+                    &step.name,
+                    format!("Header '{}' substitution failed: {}", key, e),
+                )
+            })?;
+            req = req.header(key, resolved);
+        }
+
+        // Add body if present (with variable substitution)
+        if let Some(body) = &request.body {
+            let resolved_body = substitute_json_value(body, ctx.evaluation(), &step.name)?;
+            req = req.json(&resolved_body);
+        }
+
+        // Execute request with timeout
+        let response = tokio::time::timeout(ctx.timeout, req.send())
+            .await
+            .map_err(|_| {
+                Error::timeout(format!(
+                    "HTTP request '{}' timed out after {:?}",
+                    step.name, ctx.timeout
+                ))
+            })?
+            .map_err(|e| Error::http(format!("HTTP request '{}' failed: {}", step.name, e)))?;
+
+        // Check status
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::http(format!(
+                "HTTP request '{}' returned {}: {}",
+                step.name,
+                status,
+                truncate_body(&body, 200)
+            )));
+        }
+
+        // Parse response as JSON
+        let json: JsonValue = response.json().await.map_err(|e| {
+            Error::http(format!(
+                "HTTP request '{}' response is not valid JSON: {}",
+                step.name, e
+            ))
+        })?;
+
+        // Extract fields using JSONPath
+        let row = extract_fields(&json, &response_config.fields).map_err(|e| {
+            Error::investigation(&step.name, format!("Field extraction failed: {}", e))
+        })?;
+
+        // Write to aggregated output
+        writer.write_row(&row)?;
+
+        Ok(())
+    }
+}
+
 /// Extract fields from JSON response using JSONPath expressions
 fn extract_fields(json: &JsonValue, fields: &HashMap<String, String>) -> Result<JsonValue> {
     let mut obj = serde_json::Map::new();
@@ -233,12 +312,15 @@ fn truncate_body(body: &str, max_len: usize) -> String {
 /// Recursively substitute variables in a JSON value
 fn substitute_json_value(
     value: &JsonValue,
-    context: &SubstitutionContext,
+    context: &EvaluationContext,
     step_name: &str,
 ) -> Result<JsonValue> {
     match value {
         JsonValue::String(s) => {
-            let resolved = substitute(s, context).map_err(|e| {
+            let builder = SubstitutionBuilder::new(s, context).map_err(|e| {
+                Error::investigation(step_name, format!("Body parsing failed: {}", e))
+            })?;
+            let resolved = builder.substitute().map_err(|e| {
                 Error::investigation(step_name, format!("Body substitution failed: {}", e))
             })?;
             Ok(JsonValue::String(resolved))
@@ -253,7 +335,13 @@ fn substitute_json_value(
         JsonValue::Object(obj) => {
             let mut resolved_obj = serde_json::Map::new();
             for (key, val) in obj {
-                let resolved_key = substitute(key, context).map_err(|e| {
+                let key_builder = SubstitutionBuilder::new(key, context).map_err(|e| {
+                    Error::investigation(
+                        step_name,
+                        format!("Body key '{}' parsing failed: {}", key, e),
+                    )
+                })?;
+                let resolved_key = key_builder.substitute().map_err(|e| {
                     Error::investigation(
                         step_name,
                         format!("Body key '{}' substitution failed: {}", key, e),
@@ -271,7 +359,6 @@ fn substitute_json_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::variable::SubstitutionContext;
 
     #[test]
     fn test_extract_fields_simple() {
@@ -304,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_substitute_json_value() {
-        let context = SubstitutionContext::new()
+        let context = EvaluationContext::new()
             .with_input("user", "alice")
             .with_input("count", "42");
 

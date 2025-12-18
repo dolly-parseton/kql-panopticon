@@ -5,9 +5,8 @@
 use crate::error::Result;
 use crate::execution::result::{ResultContext, ResultHandle, ResultWriter};
 use crate::pack::InputType;
-use crate::variable::SubstitutionContext;
+use crate::variable::EvaluationContext;
 use crate::workspace::Workspace;
-use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
@@ -29,8 +28,9 @@ pub struct AcquisitionContext<'a> {
     /// Step execution timeout
     pub timeout: Duration,
 
-    /// Substitution context (inputs, secrets, previous results)
-    substitution: SubstitutionContext,
+    /// Evaluation context (inputs, secrets, previous results)
+    /// Uses 'static since we always own the step results (Cow::Owned)
+    evaluation: EvaluationContext<'static>,
 
     /// Accumulated step results
     results: ResultContext,
@@ -47,7 +47,7 @@ impl<'a> AcquisitionContext<'a> {
             workspace,
             output_dir,
             timeout,
-            substitution: SubstitutionContext::new(),
+            evaluation: EvaluationContext::new(),
             results: ResultContext::new(),
         }
     }
@@ -61,8 +61,8 @@ impl<'a> AcquisitionContext<'a> {
         input_types: HashMap<String, InputType>,
     ) -> Self {
         let mut ctx = Self::new(workspace, output_dir, timeout);
-        ctx.substitution.inputs = inputs;
-        ctx.substitution.input_types = input_types;
+        ctx.evaluation.set_inputs(inputs);
+        ctx.evaluation.set_input_types(input_types);
         ctx
     }
 
@@ -71,14 +71,14 @@ impl<'a> AcquisitionContext<'a> {
         self.output_dir
     }
 
-    /// Get the substitution context for variable resolution
-    pub fn substitution(&self) -> &SubstitutionContext {
-        &self.substitution
+    /// Get the evaluation context for variable resolution
+    pub fn evaluation(&self) -> &EvaluationContext<'static> {
+        &self.evaluation
     }
 
-    /// Get mutable access to the substitution context
-    pub fn substitution_mut(&mut self) -> &mut SubstitutionContext {
-        &mut self.substitution
+    /// Get mutable access to the evaluation context
+    pub fn evaluation_mut(&mut self) -> &mut EvaluationContext<'static> {
+        &mut self.evaluation
     }
 
     /// Get the accumulated results context
@@ -98,7 +98,7 @@ impl<'a> AcquisitionContext<'a> {
     /// - Condition evaluation in `when` clauses
     pub fn register_result(&mut self, step_name: impl Into<String>, handle: ResultHandle) {
         let name = step_name.into();
-        self.substitution.step_results.insert(name.clone(), handle.clone());
+        self.evaluation.register_result(name.clone(), handle.clone());
         self.results.insert(name, handle);
     }
 
@@ -110,19 +110,6 @@ impl<'a> AcquisitionContext<'a> {
     /// Get row count for a step
     pub fn step_row_count(&self, step_name: &str) -> Result<usize> {
         self.results.row_count(step_name)
-    }
-
-    /// Set the foreach iteration row
-    ///
-    /// Used during foreach step execution to provide the current
-    /// row to variable substitution.
-    pub fn set_foreach_row(&mut self, alias: String, row: JsonValue) {
-        self.substitution.foreach_row = Some((alias, row));
-    }
-
-    /// Clear the foreach iteration row
-    pub fn clear_foreach_row(&mut self) {
-        self.substitution.foreach_row = None;
     }
 
     /// Take ownership of the accumulated results
@@ -182,8 +169,8 @@ mod tests {
         );
 
         assert_eq!(
-            ctx.substitution().inputs.get("target"),
-            Some(&"10.0.0.1".to_string())
+            ctx.evaluation().get_input("target"),
+            Some("10.0.0.1")
         );
     }
 }

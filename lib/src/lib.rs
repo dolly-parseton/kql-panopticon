@@ -74,9 +74,8 @@ pub use pack::{
     // Core pack structure
     Acquisition, Pack, Processing, Reporting,
     // Acquisition types
-    AcquisitionStepType, AggregateStrategy, AuthMethod, HttpMethod, HttpRequest,
-    HttpResponse, Input, InputType, OnEmpty, OnError, OutputConfig, QuoteStyle,
-    SecretsConfig, Step, StepType,
+    AcquisitionStepType, AuthMethod, HttpMethod, HttpRequest, HttpResponse, Input, InputType,
+    OnError, OutputConfig, QuoteStyle, SecretsConfig, Step, StepType,
     // Processing types
     MatchedIndicator, ProcessingStep, ProcessingStepConfig, ScoringConfig,
     ScoringIndicator, ScoringResult, ScoringThreshold,

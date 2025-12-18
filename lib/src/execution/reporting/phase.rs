@@ -6,8 +6,8 @@ use crate::error::{Error, Result};
 use crate::execution::progress::{ExecutionPhase, ProgressSender};
 use crate::execution::result::ResultContext;
 use crate::pack::Reporting;
+use crate::variable::evaluate_condition_new as evaluate_condition;
 use crate::workspace::Workspace;
-use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -170,11 +170,21 @@ impl ReportingPhaseHandler {
             "Starting reporting phase"
         );
 
+        // Create evaluation context for condition checking
+        let eval_ctx = ctx.to_evaluation_context();
+
         // Execute each report
         for report in &reporting.reports {
-            // Check `when` condition using lazy context access
+            // Check `when` condition using variable module evaluation
             if let Some(when_condition) = &report.when {
-                let condition_met = evaluate_report_condition(when_condition, &ctx);
+                let condition_met = evaluate_condition(when_condition, &eval_ctx)
+                    .unwrap_or_else(|e| {
+                        debug!(
+                            "Report '{}' condition evaluation failed: {}",
+                            report.name, e
+                        );
+                        false
+                    });
 
                 debug!(
                     "Report '{}' when='{}' evaluated to: {}",
@@ -324,76 +334,5 @@ impl ReportingPhaseHandler {
 impl Default for ReportingPhaseHandler {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Evaluate a report condition using the reporting context
-///
-/// Supports simple conditions like:
-/// - `processing.risk_score.score > 30`
-/// - `acquisition.signins is not empty`
-/// - `signins is not empty`
-fn evaluate_report_condition(condition: &str, ctx: &ReportingContext<'_>) -> bool {
-    let condition = condition.trim();
-
-    // Check for "is empty" / "is not empty"
-    if condition.ends_with("is empty") {
-        let path = condition.trim_end_matches("is empty").trim();
-        return ctx.is_empty(path);
-    }
-
-    if condition.ends_with("is not empty") {
-        let path = condition.trim_end_matches("is not empty").trim();
-        return !ctx.is_empty(path);
-    }
-
-    // Check for comparison operators
-    for op in [">=", "<=", ">", "<", "==", "!="] {
-        if let Some(pos) = condition.find(op) {
-            let left = condition[..pos].trim();
-            let right = condition[pos + op.len()..].trim();
-
-            let left_val = ctx.get_value(left);
-
-            if let Some(left_val) = left_val {
-                return evaluate_comparison(&left_val, op, right);
-            }
-
-            return false;
-        }
-    }
-
-    // Unknown condition format, default to true
-    debug!("Unknown condition format: '{}', defaulting to true", condition);
-    true
-}
-
-/// Evaluate a comparison operation
-fn evaluate_comparison(left: &JsonValue, op: &str, right: &str) -> bool {
-    // Try to parse right as number
-    let right_num: Option<f64> = right.trim().parse().ok();
-
-    match (left, right_num) {
-        (JsonValue::Number(n), Some(rn)) => {
-            let ln = n.as_f64().unwrap_or(0.0);
-            match op {
-                ">" => ln > rn,
-                "<" => ln < rn,
-                ">=" => ln >= rn,
-                "<=" => ln <= rn,
-                "==" => (ln - rn).abs() < f64::EPSILON,
-                "!=" => (ln - rn).abs() >= f64::EPSILON,
-                _ => false,
-            }
-        }
-        (JsonValue::String(s), _) => {
-            let right_str = right.trim().trim_matches('"').trim_matches('\'');
-            match op {
-                "==" => s == right_str,
-                "!=" => s != right_str,
-                _ => false,
-            }
-        }
-        _ => false,
     }
 }

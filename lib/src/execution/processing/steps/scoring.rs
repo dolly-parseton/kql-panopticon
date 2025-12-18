@@ -9,7 +9,7 @@ use crate::execution::processing::{
 use crate::pack::{
     MatchedIndicator, ProcessingStep, ProcessingStepConfig, ScoringConfig, ScoringResult,
 };
-use crate::variable::evaluate_condition;
+use crate::variable::{evaluate_condition_new as evaluate_condition, EvaluationContext};
 use async_trait::async_trait;
 use serde_json::json;
 use std::time::Instant;
@@ -119,9 +119,22 @@ fn evaluate_scoring(
     let mut total_score: i32 = 0;
     let mut matched_indicators = Vec::new();
 
+    // Create evaluation context from acquisition results
+    let eval_ctx = EvaluationContext::new()
+        .with_step_results(ctx.acquisition_results().clone());
+
     // Evaluate each indicator against acquisition results
     for indicator in &config.indicators {
-        let matched = evaluate_condition(&indicator.condition, ctx.acquisition_results());
+        let matched = match evaluate_condition(&indicator.condition, &eval_ctx) {
+            Ok(met) => met,
+            Err(e) => {
+                debug!(
+                    "Indicator '{}': condition='{}' evaluation failed: {}",
+                    indicator.name, indicator.condition, e
+                );
+                false
+            }
+        };
 
         debug!(
             "Indicator '{}': condition='{}' matched={}",
@@ -210,13 +223,13 @@ mod tests {
             indicators: vec![
                 ScoringIndicator {
                     name: "high_failures".to_string(),
-                    condition: "signins.any(failed > 10)".to_string(),
+                    condition: "{{signins | any(failed > 10)}}".to_string(),
                     weight: 25,
                     description: Some("High number of failed logins".to_string()),
                 },
                 ScoringIndicator {
                     name: "high_alerts".to_string(),
-                    condition: "alerts.any(severity == 'High')".to_string(),
+                    condition: "{{alerts | any(severity == 'High')}}".to_string(),
                     weight: 30,
                     description: Some("High severity alerts present".to_string()),
                 },

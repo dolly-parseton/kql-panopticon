@@ -11,6 +11,7 @@
 
 use crate::error::Result;
 use crate::execution::result::ResultContext;
+use crate::variable::EvaluationContext;
 use crate::workspace::Workspace;
 use chrono::Local;
 use serde_json::Value as JsonValue;
@@ -159,6 +160,31 @@ impl<'a> ReportingContext<'a> {
     /// Get metadata reference
     pub fn metadata(&self) -> &ReportMetadata {
         &self.metadata
+    }
+
+    /// Create an EvaluationContext for condition evaluation
+    ///
+    /// Merges acquisition and processing results into a single context
+    /// for use with the variable module's `evaluate_condition` function.
+    ///
+    /// ## Example
+    ///
+    /// ```rust,ignore
+    /// let eval_ctx = reporting_ctx.to_evaluation_context();
+    /// let should_run = evaluate_condition("{{signins | is_not_empty}}", &eval_ctx)?;
+    /// ```
+    pub fn to_evaluation_context(&self) -> EvaluationContext<'static> {
+        // Clone acquisition results as the base
+        let mut merged = self.acquisition_results.clone();
+
+        // Merge in processing results if present
+        if let Some(proc_results) = self.processing_results {
+            merged.merge(proc_results.clone());
+        }
+
+        EvaluationContext::new()
+            .with_step_results(merged)
+            .with_inputs(self.inputs.clone())
     }
 
     /// Build template data by materializing results

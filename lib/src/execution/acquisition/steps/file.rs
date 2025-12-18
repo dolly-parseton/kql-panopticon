@@ -8,7 +8,7 @@ use crate::execution::acquisition::{
 };
 use crate::execution::result::ResultWriter;
 use crate::pack::{AcquisitionStepType, FileFormat, Step};
-use crate::variable::substitute;
+use crate::variable::{ContextType, SubstitutionBuilder};
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::path::Path;
@@ -50,7 +50,16 @@ impl AcquisitionStepHandler for FileStepHandler {
         })?;
 
         // Substitute variables in path
-        let path = substitute(&source.path, ctx.substitution()).map_err(|e| {
+        let builder = SubstitutionBuilder::new(&source.path, ctx.evaluation()).map_err(|e| {
+            Error::investigation(&step.name, format!("Path parsing failed: {}", e))
+        })?;
+
+        // File steps don't support for_each
+        builder.validate(ContextType::KqlQuery).map_err(|e| {
+            Error::investigation(&step.name, format!("Path validation failed: {}", e))
+        })?;
+
+        let path = builder.substitute().map_err(|e| {
             Error::investigation(&step.name, format!("Path substitution failed: {}", e))
         })?;
 

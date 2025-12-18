@@ -5,11 +5,8 @@
 use crate::error::{Error, Result};
 use crate::execution::progress::{ExecutionPhase, ProgressSender};
 use crate::execution::result::ResultContext;
-use crate::pack::{
-    Acquisition, AcquisitionStepType, AggregateStrategy, ForeachClause, OnEmpty, OnError, Pack,
-    Step,
-};
-use crate::variable::evaluate_condition;
+use crate::pack::{Acquisition, AcquisitionStepType, OnError, Pack, Step};
+use crate::variable::evaluate_condition_new as evaluate_condition;
 use crate::workspace::Workspace;
 use std::collections::HashMap;
 use std::path::Path;
@@ -163,8 +160,16 @@ impl AcquisitionPhaseHandler {
 
             // Check `when` condition
             if let Some(when_condition) = &step.when {
-                let condition_met =
-                    evaluate_condition(when_condition, &ctx.substitution().step_results);
+                let condition_met = match evaluate_condition(when_condition, ctx.evaluation()) {
+                    Ok(met) => met,
+                    Err(e) => {
+                        warn!(
+                            "Step '{}' when='{}' evaluation failed: {}",
+                            step.name, when_condition, e
+                        );
+                        false
+                    }
+                };
 
                 debug!(
                     "Step '{}' when='{}' evaluated to: {}",
@@ -202,13 +207,10 @@ impl AcquisitionPhaseHandler {
                 "Starting step execution"
             );
 
-            // Execute step (with or without foreach)
-            let result = if let Some(foreach_str) = &step.foreach {
-                self.execute_foreach_step(step, foreach_str, &mut ctx, progress)
-                    .await
-            } else {
-                self.execute_single_step(step, &mut ctx).await
-            };
+            // Execute step
+            // Note: for_each iteration is now handled at the HTTP step level,
+            // not at the phase orchestration level
+            let result = self.execute_single_step(step, &mut ctx).await;
 
             match result {
                 Ok(output) => {
@@ -326,177 +328,6 @@ impl AcquisitionPhaseHandler {
         })?;
 
         handler.execute(step, ctx).await
-    }
-
-    /// Execute a step with foreach iteration
-    async fn execute_foreach_step(
-        &self,
-        step: &Step,
-        foreach_str: &str,
-        ctx: &mut AcquisitionContext<'_>,
-        progress: Option<&ProgressSender>,
-    ) -> Result<AcquisitionStepOutput> {
-        let start = Instant::now();
-
-        // Parse foreach clause
-        let foreach_clause = ForeachClause::parse(foreach_str).ok_or_else(|| {
-            Error::pack(format!(
-                "Invalid foreach syntax '{}' in step '{}'. Expected: 'step_name as alias'",
-                foreach_str, step.name
-            ))
-        })?;
-
-        // Get source handle
-        let source_handle = ctx
-            .results()
-            .get(&foreach_clause.source_step)
-            .ok_or_else(|| {
-                Error::execution(format!(
-                    "Foreach source step '{}' not found for step '{}'",
-                    foreach_clause.source_step, step.name
-                ))
-            })?;
-
-        // Handle empty source
-        let is_empty = source_handle.is_empty().unwrap_or(true);
-        if is_empty {
-            let on_empty = step.on_empty.unwrap_or_default();
-            match on_empty {
-                OnEmpty::Skip => {
-                    debug!(
-                        "Step '{}' skipped: foreach source '{}' is empty",
-                        step.name, foreach_clause.source_step
-                    );
-                    let writer = ctx.writer(&step.name)?;
-                    let handle = writer.finish()?;
-                    return Ok(AcquisitionStepOutput::new(handle, start.elapsed()));
-                }
-                OnEmpty::Error => {
-                    return Err(Error::execution(format!(
-                        "Foreach source '{}' is empty for step '{}'",
-                        foreach_clause.source_step, step.name
-                    )));
-                }
-            }
-        }
-
-        let total_iterations = source_handle.row_count().unwrap_or(0);
-        let mut failed_count = 0;
-        let on_error = step.on_error.unwrap_or_default();
-
-        debug!(
-            "Step '{}' starting foreach over {} rows from '{}'",
-            step.name, total_iterations, foreach_clause.source_step
-        );
-
-        // Create output writer
-        let mut result_writer = ctx.writer(&step.name)?;
-        let mut last_iteration_results: Vec<serde_json::Value> = Vec::new();
-
-        // Iterate over source rows
-        let source_rows = source_handle.iter_rows().map_err(|e| {
-            Error::execution(format!(
-                "Failed to iterate source '{}' for step '{}': {}",
-                foreach_clause.source_step, step.name, e
-            ))
-        })?;
-
-        for (index, row_result) in source_rows.enumerate() {
-            let row = row_result.map_err(|e| {
-                Error::execution(format!(
-                    "Failed to read row {} from source '{}': {}",
-                    index, foreach_clause.source_step, e
-                ))
-            })?;
-
-            // Emit foreach progress
-            if let Some(tx) = progress {
-                tx.foreach_progress(&step.name, &ctx.workspace.name, index + 1, total_iterations);
-            }
-
-            // Set foreach row in context
-            ctx.set_foreach_row(foreach_clause.alias.clone(), row.clone());
-
-            // Execute iteration
-            let iter_result = self.execute_single_step(step, ctx).await;
-
-            match iter_result {
-                Ok(output) => {
-                    let iter_rows = output.handle().materialize().unwrap_or_default();
-
-                    // Aggregate based on strategy
-                    match step.aggregate.unwrap_or_default() {
-                        AggregateStrategy::Append => {
-                            for iter_row in iter_rows {
-                                result_writer.write_row(&iter_row)?;
-                            }
-                        }
-                        AggregateStrategy::Collect => {
-                            let collected = serde_json::json!({
-                                "_iteration": index,
-                                "_source_row": row,
-                                "results": iter_rows,
-                            });
-                            result_writer.write_row(&collected)?;
-                        }
-                        AggregateStrategy::Merge => {
-                            if let Some(first) = iter_rows.into_iter().next() {
-                                result_writer.write_row(&first)?;
-                            }
-                        }
-                        AggregateStrategy::Replace => {
-                            last_iteration_results = iter_rows;
-                        }
-                    }
-                }
-                Err(e) => {
-                    failed_count += 1;
-                    warn!(
-                        "Foreach iteration {}/{} failed for step '{}': {}",
-                        index + 1,
-                        total_iterations,
-                        step.name,
-                        e
-                    );
-
-                    match on_error {
-                        OnError::Fail => {
-                            ctx.clear_foreach_row();
-                            return Err(Error::execution(format!(
-                                "Foreach iteration {} failed: {}",
-                                index + 1,
-                                e
-                            )));
-                        }
-                        OnError::Skip | OnError::Continue => {
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-
-        ctx.clear_foreach_row();
-
-        // For Replace strategy, write final results
-        if matches!(step.aggregate.unwrap_or_default(), AggregateStrategy::Replace) {
-            for row in last_iteration_results {
-                result_writer.write_row(&row)?;
-            }
-        }
-
-        let handle = result_writer.finish()?;
-        let result_count = handle.row_count().unwrap_or(0);
-
-        debug!(
-            "Step '{}' foreach completed: {}/{} iterations successful, {} total results",
-            step.name,
-            total_iterations - failed_count,
-            total_iterations,
-            result_count
-        );
-
-        Ok(AcquisitionStepOutput::new(handle, start.elapsed()))
     }
 
     /// Validate all steps in the acquisition config

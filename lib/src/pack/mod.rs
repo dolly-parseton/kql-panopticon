@@ -321,12 +321,6 @@ impl Pack {
                 for dep in &step.depends_on {
                     visit(dep, step_map, visited, temp_visited, result)?;
                 }
-                // Visit implicit foreach dependency
-                if let Some(foreach) = &step.foreach {
-                    if let Some(clause) = ForeachClause::parse(foreach) {
-                        visit(&clause.source_step, step_map, visited, temp_visited, result)?;
-                    }
-                }
                 visited.insert(step_name.to_string());
                 result.push(step);
             }
@@ -348,17 +342,9 @@ impl Pack {
         Ok(result)
     }
 
-    /// Get all dependencies for a step (explicit + implicit from foreach)
+    /// Get all dependencies for a step
     pub fn get_all_dependencies(&self, step: &Step) -> Vec<String> {
-        let mut deps = step.depends_on.clone();
-        if let Some(foreach) = &step.foreach {
-            if let Some(clause) = ForeachClause::parse(foreach) {
-                if !deps.contains(&clause.source_step) {
-                    deps.push(clause.source_step);
-                }
-            }
-        }
-        deps
+        step.depends_on.clone()
     }
 
     /// Get acquisition step by name

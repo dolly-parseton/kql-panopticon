@@ -2,7 +2,7 @@
 //!
 //! Validates pack structure, dependencies, and step configurations.
 
-use super::types::{ForeachClause, Step, StepType};
+use super::types::{Step, StepType};
 use super::Pack;
 use crate::error::{Error, Result};
 use std::collections::{HashMap, HashSet};
@@ -14,7 +14,6 @@ impl Pack {
         self.validate_steps_not_empty()?;
         self.validate_step_names_unique()?;
         self.validate_step_types()?;
-        self.validate_foreach_syntax()?;
         self.validate_dependencies_exist()?;
         self.validate_no_circular_dependencies()?;
         self.validate_inputs()?;
@@ -60,20 +59,6 @@ impl Pack {
         Ok(())
     }
 
-    pub(super) fn validate_foreach_syntax(&self) -> Result<()> {
-        for step in &self.acquisition.steps {
-            if let Some(foreach) = &step.foreach {
-                if ForeachClause::parse(foreach).is_none() {
-                    return Err(Error::pack(format!(
-                        "Invalid foreach syntax in step '{}': '{}'. Expected 'step_name as alias'",
-                        step.name, foreach
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub(super) fn validate_dependencies_exist(&self) -> Result<()> {
         let step_names: HashSet<_> = self.acquisition.steps.iter().map(|s| &s.name).collect();
 
@@ -86,16 +71,6 @@ impl Pack {
                     )));
                 }
             }
-            if let Some(foreach) = &step.foreach {
-                if let Some(clause) = ForeachClause::parse(foreach) {
-                    if !step_names.contains(&clause.source_step) {
-                        return Err(Error::pack(format!(
-                            "Step '{}' foreach references non-existent step '{}'",
-                            step.name, clause.source_step
-                        )));
-                    }
-                }
-            }
         }
         Ok(())
     }
@@ -103,21 +78,7 @@ impl Pack {
     pub(super) fn validate_no_circular_dependencies(&self) -> Result<()> {
         let mut graph: HashMap<&str, Vec<&str>> = HashMap::new();
         for step in &self.acquisition.steps {
-            let mut deps: Vec<&str> = step.depends_on.iter().map(|s| s.as_str()).collect();
-            if let Some(foreach) = &step.foreach {
-                if let Some(clause) = ForeachClause::parse(foreach) {
-                    if let Some(source) = self
-                        .acquisition
-                        .steps
-                        .iter()
-                        .find(|s| s.name == clause.source_step)
-                    {
-                        if !deps.contains(&source.name.as_str()) {
-                            deps.push(&source.name);
-                        }
-                    }
-                }
-            }
+            let deps: Vec<&str> = step.depends_on.iter().map(|s| s.as_str()).collect();
             graph.insert(&step.name, deps);
         }
 

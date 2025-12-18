@@ -204,22 +204,6 @@ pub struct Step {
     #[serde(default)]
     pub when: Option<String>,
 
-    /// Foreach iteration: "step_name as alias"
-    #[serde(default)]
-    pub foreach: Option<String>,
-
-    /// Batch size for foreach iterations
-    #[serde(default)]
-    pub batch_size: Option<usize>,
-
-    /// How to aggregate foreach results
-    #[serde(default)]
-    pub aggregate: Option<AggregateStrategy>,
-
-    /// Behavior when foreach source is empty
-    #[serde(default)]
-    pub on_empty: Option<OnEmpty>,
-
     /// Step-level options
     #[serde(default)]
     pub options: Option<StepOptions>,
@@ -366,32 +350,6 @@ pub enum RateLimitPeriod {
     Hour,
 }
 
-/// Aggregation strategy for foreach results
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AggregateStrategy {
-    /// Concatenate all result rows
-    #[default]
-    Append,
-    /// Deep merge result objects
-    Merge,
-    /// Keep only last iteration
-    Replace,
-    /// Wrap each iteration, keyed by source
-    Collect,
-}
-
-/// Behavior when foreach source is empty
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OnEmpty {
-    /// Skip the step
-    #[default]
-    Skip,
-    /// Fail the execution
-    Error,
-}
-
 /// Error handling behavior
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -482,43 +440,9 @@ pub struct SecretsConfig {
 // Note: ReportConfig, ScoringConfig and related types have been moved to
 // pack/reporting.rs and pack/processing.rs respectively.
 
-/// Parsed foreach clause
-#[derive(Debug, Clone)]
-pub struct ForeachClause {
-    /// Source step name
-    pub source_step: String,
-    /// Alias for current row/batch
-    pub alias: String,
-}
-
-impl ForeachClause {
-    /// Parse "step_name as alias"
-    pub fn parse(foreach: &str) -> Option<Self> {
-        let parts: Vec<&str> = foreach.split_whitespace().collect();
-        if parts.len() == 3 && parts[1].eq_ignore_ascii_case("as") {
-            Some(ForeachClause {
-                source_step: parts[0].to_string(),
-                alias: parts[2].to_string(),
-            })
-        } else {
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_foreach_syntax() {
-        let clause = ForeachClause::parse("step1 as item").unwrap();
-        assert_eq!(clause.source_step, "step1");
-        assert_eq!(clause.alias, "item");
-
-        assert!(ForeachClause::parse("step1 item").is_none());
-        assert!(ForeachClause::parse("").is_none());
-    }
 
     #[test]
     fn test_quote_styles() {
